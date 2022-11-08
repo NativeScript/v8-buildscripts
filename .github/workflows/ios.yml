@@ -6,7 +6,7 @@ jobs:
   build:
     runs-on: macOS-latest
     env:
-      NO_INTL: false
+      NO_INTL: true
       NO_JIT: true
 
     steps:
