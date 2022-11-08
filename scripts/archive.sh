@@ -30,10 +30,13 @@ function createAAR() {
   popd
 }
 
-function createUniversalDylib() {
-  printf "\n\n\t\t===================== create universal dylib =====================\n\n"
-  mkdir -p "${BUILD_DIR}/lib/universal"
-  lipo "${BUILD_DIR}/lib/arm64/libv8.dylib" "${BUILD_DIR}/lib/x64/libv8.dylib" -output "${BUILD_DIR}/lib/universal/libv8.dylib" -create
+function copyAndroidTools() {
+  printf "\n\n\t\t===================== copy android tools =====================\n\n"
+  mkdir "${DIST_PACKAGE_DIR}/android"
+  mkdir "${DIST_PACKAGE_DIR}/android/ndk"
+  mkdir "${DIST_PACKAGE_DIR}/android/sdk"
+  cp -Rf "${V8_DIR}/third_party/android_ndk" "${DIST_PACKAGE_DIR}/android/ndk"
+  cp -Rf "${V8_DIR}/third_party/android_sdk" "${DIST_PACKAGE_DIR}/android/sdk"
 }
 
 function copyDylib() {
@@ -81,13 +84,12 @@ if [[ ${PLATFORM} = "android" ]]; then
   yes | sdkmanager --licenses
 
   mkdir -p "${DIST_PACKAGE_DIR}"
-  createAAR
-  createUnstrippedLibs
+  copyDylib
+  copyAndroidTools
   copyHeaders
   copyTools
   copySnapshotBlobIfNeeded
 elif [[ ${PLATFORM} = "ios" ]]; then
-  createUniversalDylib
   copyDylib
   copyHeaders
   copyTools

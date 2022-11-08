@@ -8,6 +8,8 @@ ARCH=$2
 
 GN_ARGS_BASE="
   is_component_build=false
+  v8_monolithic=true
+  v8_static_library=true
   use_custom_libcxx=false
   icu_use_data_file=false
   treat_warnings_as_errors=false
@@ -95,29 +97,15 @@ function buildArch()
   local arch=$1
   local platform_arch=$(normalize_arch_for_platform $arch)
 
-  local target=''
-  local target_ext=''
-  if [[ ${PLATFORM} = "android" ]]; then
-    target="libv8android"
-    target_ext=".so"
-  elif [[ ${PLATFORM} = "ios" ]]; then
-    target="libv8"
-    target_ext=".dylib"
-  elif [[ ${PLATFORM} = "macos_android" ]]; then
-    :
-  else
-    exit 1
-  fi
-
   echo "Build v8 ${arch} variant NO_INTL=${NO_INTL} NO_JIT=${NO_JIT}"
-  gn gen --args="${GN_ARGS_BASE} ${GN_ARGS_BUILD_TYPE} target_cpu=\"${arch}\"" "out.v8.${arch}"
+  gn gen --args="${GN_ARGS_BASE} ${GN_ARGS_BUILD_TYPE} target_environment=\"simulator\" v8_target_cpu=\"${arch}\" target_cpu=\"${arch}\"" "out.v8.${arch}"
 
   if [[ ${TOOLS_ONLY} = "true" ]]; then
     date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" run_mksnapshot_default mkcodecache_group ; date
     copySnapshot $arch
     copyMkcodecache $arch
  else
-    date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" ${target} run_mksnapshot_default mkcodecache_group ; date
+    date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" v8_base_without_compiler v8_compiler v8_libplatform v8_libbase v8_bigint v8_snapshot torque_generated_initializers torque_generated_definitions cppgc_base v8_heap_base_headers v8_heap_base ; date
     copyLib $arch
     copySnapshot $arch
     copyMkcodecache $arch
@@ -129,24 +117,12 @@ function copyLib()
   local arch=$1
   local platform_arch=$(normalize_arch_for_platform $arch)
 
-  local target=''
-  local target_ext=''
-  if [[ ${PLATFORM} = "android" ]]; then
-    target="libv8android"
-    target_ext=".so"
-  elif [[ ${PLATFORM} = "ios" ]]; then
-    target="libv8"
-    target_ext=".dylib"
-  else
-    exit 1
-  fi
-
   mkdir -p "${BUILD_DIR}/lib/${platform_arch}"
-  cp -f "out.v8.${arch}/${target}${target_ext}" "${BUILD_DIR}/lib/${platform_arch}/${target}${target_ext}"
+  cp -rf "out.v8.${arch}" "${BUILD_DIR}/lib/${platform_arch}/"
 
   if [[ -d "out.v8.${arch}/lib.unstripped" ]]; then
     mkdir -p "${BUILD_DIR}/lib.unstripped/${platform_arch}"
-    cp -f "out.v8.${arch}/lib.unstripped/${target}${target_ext}" "${BUILD_DIR}/lib.unstripped/${platform_arch}/${target}${target_ext}"
+    cp -rf "out.v8.${arch}/lib.unstripped" "${BUILD_DIR}/lib.unstripped/${platform_arch}/"
   fi
 }
 
@@ -186,7 +162,7 @@ elif [[ ${PLATFORM} = "android" ]]; then
   buildArch "x64"
 elif [[ ${PLATFORM} = "ios" ]]; then
   buildArch "arm64"
-  buildArch "x64"
+  # buildArch "x64"
 elif [[ ${PLATFORM} = "macos_android" ]]; then
   # buildArch "arm"
   # buildArch "x86"

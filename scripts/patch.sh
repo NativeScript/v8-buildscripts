@@ -6,14 +6,14 @@ source $(dirname $0)/env.sh
 ######################################################################################
 V8_PATCHSET_ANDROID=(
   # V8 shared library support
-  "v8_shared_library.patch"
+  # "v8_shared_library.patch"
 
   # https://github.com/Kudo/react-native-v8/issues/27
-  "workaround_jsi_object_freeze.patch"
+  # "workaround_jsi_object_freeze.patch"
 
   # Support to specify custom timezone
   # https://github.com/Kudo/react-native-v8/issues/37
-  "custom_timezone.patch"
+  # "custom_timezone.patch"
 
   # Fix v8 9.7 build error
   "v8_97_android_build_error.patch"
@@ -27,15 +27,15 @@ V8_PATCHSET_ANDROID=(
 
   # Fix for [react-native-bottom-sheet](https://github.com/gorhom/react-native-bottom-sheet) not working
   # revert https://chromium-review.googlesource.com/c/v8/v8/+/3548458
-  "fix_for_bottom_sheet.patch"
+  # "fix_for_bottom_sheet.patch"
 )
 
 V8_PATCHSET_IOS=(
   # V8 shared library support
-  "v8_shared_library_ios.patch"
+  # "v8_shared_library_ios.patch"
 
   # https://github.com/Kudo/react-native-v8/issues/27
-  "workaround_jsi_object_freeze.patch"
+  # "workaround_jsi_object_freeze.patch"
 
   # Workaround latest Xcode12 build break on non Apple Silicon
   # "v8_ios_host_break.patch"
@@ -48,7 +48,7 @@ V8_PATCHSET_IOS=(
 
   # Fix for [react-native-bottom-sheet](https://github.com/gorhom/react-native-bottom-sheet) not working
   # revert https://chromium-review.googlesource.com/c/v8/v8/+/3548458
-  "fix_for_bottom_sheet.patch"
+  # "fix_for_bottom_sheet.patch"
 )
 
 V8_PATCHSET_MACOS_ANDROID=(
