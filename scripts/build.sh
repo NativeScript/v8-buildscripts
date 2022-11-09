@@ -98,7 +98,7 @@ function buildArch()
   local platform_arch=$(normalize_arch_for_platform $arch)
 
   echo "Build v8 ${arch} variant NO_INTL=${NO_INTL} NO_JIT=${NO_JIT}"
-  gn gen --args="${GN_ARGS_BASE} ${GN_ARGS_BUILD_TYPE} target_environment=\"simulator\" v8_target_cpu=\"${arch}\" target_cpu=\"${arch}\"" "out.v8.${arch}"
+  gn gen --args="${GN_ARGS_BASE} ${GN_ARGS_BUILD_TYPE} v8_target_cpu=\"${arch}\" target_cpu=\"${arch}\"" "out.v8.${arch}"
 
   if [[ ${TOOLS_ONLY} = "true" ]]; then
     date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" run_mksnapshot_default mkcodecache_group ; date
