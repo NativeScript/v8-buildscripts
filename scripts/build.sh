@@ -161,8 +161,8 @@ elif [[ ${PLATFORM} = "android" ]]; then
   buildArch "arm64"
   buildArch "x64"
 elif [[ ${PLATFORM} = "ios" ]]; then
-  buildArch "arm64"
-  # buildArch "x64"
+  # buildArch "arm64"
+  buildArch "x64"
 elif [[ ${PLATFORM} = "macos_android" ]]; then
   # buildArch "arm"
   # buildArch "x86"
