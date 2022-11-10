@@ -41,14 +41,16 @@ V8_PATCHSET_IOS=(
   # "v8_ios_host_break.patch"
 
   # Fix use_system_xcode build error
-  "system_xcode_build_error.patch"
+  # "system_xcode_build_error.patch"
 
   # Add mkcodecache tool
-  "mkcodecache.patch"
+  # "mkcodecache.patch"
 
   # Fix for [react-native-bottom-sheet](https://github.com/gorhom/react-native-bottom-sheet) not working
   # revert https://chromium-review.googlesource.com/c/v8/v8/+/3548458
   # "fix_for_bottom_sheet.patch"
+
+  "arm64_catalyst.patch"
 )
 
 V8_PATCHSET_MACOS_ANDROID=(
