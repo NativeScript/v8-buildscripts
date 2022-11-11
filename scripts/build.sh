@@ -14,6 +14,11 @@ GN_ARGS_BASE="
   icu_use_data_file=false
   treat_warnings_as_errors=false
   default_min_sdk_version=21
+  symbol_level=0
+  v8_enable_v8_checks=false
+  v8_enable_debugging_features=false
+  v8_enable_webassembly=false
+  is_official_build=true
 "
 
 if [[ ${PLATFORM} = "macos_android" ]]; then
@@ -23,7 +28,7 @@ else
 fi
 
 if [[ ${PLATFORM} = "ios" ]]; then
-  GN_ARGS_BASE="${GN_ARGS_BASE} enable_ios_bitcode=false use_xcode_clang=true ios_enable_code_signing=false v8_enable_pointer_compression=false ios_deployment_target=${IOS_DEPLOYMENT_TARGET}"
+  GN_ARGS_BASE="${GN_ARGS_BASE} enable_ios_bitcode=false use_xcode_clang=true ios_enable_code_signing=false v8_enable_pointer_compression=false ios_deployment_target=\"${IOS_DEPLOYMENT_TARGET}\""
 elif [[ ${PLATFORM} = "android" ]]; then
   # Workaround v8 sysroot build issues with custom ndk
   GN_ARGS_BASE="${GN_ARGS_BASE} use_sysroot=false"
