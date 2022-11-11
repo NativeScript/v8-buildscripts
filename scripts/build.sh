@@ -14,6 +14,11 @@ GN_ARGS_BASE="
   icu_use_data_file=false
   treat_warnings_as_errors=false
   default_min_sdk_version=21
+  symbol_level=0
+  v8_enable_v8_checks=false
+  v8_enable_debugging_features=false
+  v8_enable_webassembly=false
+  is_official_build=true
 "
 
 if [[ ${PLATFORM} = "macos_android" ]]; then
@@ -96,7 +101,6 @@ function buildArch()
 {
   local arch=$1
   local platform_arch=$(normalize_arch_for_platform $arch)
-
   echo "Build v8 ${arch} variant NO_INTL=${NO_INTL} NO_JIT=${NO_JIT}"
   gn gen --args="${GN_ARGS_BASE} ${GN_ARGS_BUILD_TYPE} target_environment=\"catalyst\" v8_target_cpu=\"${arch}\" target_cpu=\"${arch}\"" "out.v8.${arch}"
 
