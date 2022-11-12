@@ -78,15 +78,15 @@ if [[ ${TOOLS_ONLY} = "true" ]]; then
 fi
 
 if [[ ${PLATFORM} = "android" ]]; then
-  export ANDROID_HOME="${V8_DIR}/third_party/android_sdk/public"
-  export ANDROID_NDK="${V8_DIR}/third_party/android_ndk"
-  export PATH=${ANDROID_HOME}/emulator:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}
-  yes | sdkmanager --licenses
+  # export ANDROID_HOME="${V8_DIR}/third_party/android_sdk/public"
+  # export ANDROID_NDK="${V8_DIR}/third_party/android_ndk"
+  # export PATH=${ANDROID_HOME}/emulator:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}
+  # yes | sdkmanager --licenses
 
   mkdir -p "${DIST_PACKAGE_DIR}"
   copyDylib
-  copyAndroidTools
-  copyHeaders
+  # copyAndroidTools
+  # copyHeaders
   # copyTools
   copySnapshotBlobIfNeeded
 elif [[ ${PLATFORM} = "ios" ]]; then
