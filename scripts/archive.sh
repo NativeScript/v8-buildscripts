@@ -87,7 +87,7 @@ if [[ ${PLATFORM} = "android" ]]; then
   copyDylib
   copyAndroidTools
   copyHeaders
-  copyTools
+  # copyTools
   copySnapshotBlobIfNeeded
 elif [[ ${PLATFORM} = "ios" ]]; then
   copyDylib
