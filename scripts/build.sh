@@ -31,7 +31,7 @@ if [[ ${PLATFORM} = "ios" ]]; then
   GN_ARGS_BASE="${GN_ARGS_BASE} enable_ios_bitcode=false use_xcode_clang=true ios_enable_code_signing=false v8_enable_pointer_compression=false ios_deployment_target=\"${IOS_DEPLOYMENT_TARGET}\""
 elif [[ ${PLATFORM} = "android" ]]; then
   # Workaround v8 sysroot build issues with custom ndk
-  GN_ARGS_BASE="${GN_ARGS_BASE} use_sysroot=false"
+  GN_ARGS_BASE="${GN_ARGS_BASE} use_thin_lto=false use_sysroot=false"
 fi
 
 if [[ ${NO_INTL} = "true" ]]; then
