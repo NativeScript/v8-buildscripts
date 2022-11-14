@@ -110,9 +110,9 @@ function buildArch()
     copySnapshot $arch
     copyMkcodecache $arch
  else
-    date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" v8_base_without_compiler v8_compiler v8_libplatform v8_libbase v8_bigint v8_snapshot torque_generated_initializers torque_generated_definitions cppgc_base v8_heap_base_headers v8_heap_base ; date
+    date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" v8_base_without_compiler v8_compiler v8_libplatform v8_libbase v8_bigint v8_snapshot torque_generated_initializers torque_generated_definitions cppgc_base v8_heap_base_headers v8_heap_base run_mksnapshot_default; date
     copyLib $arch
-    # copySnapshot $arch
+    copySnapshot $arch
     # copyMkcodecache $arch
   fi
 }
