@@ -5,6 +5,8 @@ source $(dirname $0)/env.sh
 # Patchset management that manage files by commented purpose
 ######################################################################################
 V8_PATCHSET_ANDROID=(
+  "v8_monolith_snapshot.patch"
+  
   # V8 shared library support
   # "v8_shared_library.patch"
 
