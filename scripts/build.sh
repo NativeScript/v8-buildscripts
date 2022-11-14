@@ -8,7 +8,7 @@ ARCH=$2
 
 GN_ARGS_BASE="
   is_component_build=false
-  v8_monolithic=true
+  v8_monolithic=false
   v8_static_library=true
   use_custom_libcxx=false
   icu_use_data_file=false
