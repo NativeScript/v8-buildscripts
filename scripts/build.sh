@@ -17,7 +17,7 @@ GN_ARGS_BASE="
   symbol_level=0
   v8_enable_v8_checks=false
   v8_enable_debugging_features=false
-  v8_enable_webassembly=false
+  v8_enable_webassembly=true
   is_official_build=true
 "
 
