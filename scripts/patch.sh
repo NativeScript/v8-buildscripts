@@ -49,6 +49,9 @@ V8_PATCHSET_IOS=(
   # Fix for [react-native-bottom-sheet](https://github.com/gorhom/react-native-bottom-sheet) not working
   # revert https://chromium-review.googlesource.com/c/v8/v8/+/3548458
   # "fix_for_bottom_sheet.patch"
+
+  # Find libclang_rt.iossim.a on Xcode 14
+  "v8_build_xcode14_toolchain_fixes.patch"
 )
 
 V8_PATCHSET_MACOS_ANDROID=(
