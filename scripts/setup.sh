@@ -30,9 +30,11 @@ if [[ ! -d "${DEPOT_TOOLS_DIR}" || ! -f "${DEPOT_TOOLS_DIR}/gclient" ]]; then
   git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "${DEPOT_TOOLS_DIR}"
 fi
 
+echo Running: gclient config --name v8 --unmanaged "https://chromium.googlesource.com/v8/v8.git"
 gclient config --name v8 --unmanaged "https://chromium.googlesource.com/v8/v8.git"
 
 if [[ ${PLATFORM} = "ios" ]]; then
+  echo Running: gclient sync --deps=ios ${GCLIENT_SYNC_ARGS}
   gclient sync --deps=ios ${GCLIENT_SYNC_ARGS}
   exit 0
 fi
