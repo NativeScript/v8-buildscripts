@@ -18,14 +18,10 @@ GN_ARGS_BASE="
   v8_enable_v8_checks=false
   v8_enable_debugging_features=false
   v8_enable_webassembly=true
+  v8_use_external_startup_data=false
   is_official_build=true
+  target_os=\"${PLATFORM}\"
 "
-
-if [[ ${PLATFORM} = "macos_android" ]]; then
-  GN_ARGS_BASE="${GN_ARGS_BASE} target_os=\"android\" host_cpu=\"x64\""
-else
-  GN_ARGS_BASE="${GN_ARGS_BASE} target_os=\"${PLATFORM}\""
-fi
 
 if [[ ${PLATFORM} = "ios" ]]; then
   GN_ARGS_BASE="${GN_ARGS_BASE} enable_ios_bitcode=false use_xcode_clang=true ios_enable_code_signing=false v8_enable_pointer_compression=false ios_deployment_target=\"${IOS_DEPLOYMENT_TARGET}\""
@@ -40,12 +36,6 @@ fi
 
 if [[ ${NO_JIT} = "true" ]]; then
   GN_ARGS_BASE="${GN_ARGS_BASE} v8_enable_lite_mode=true"
-fi
-
-if [[ ${EXTERNAL_STARTUP_DATA} = "true" || ${TOOLS_ONLY} = "true" ]]; then
-  GN_ARGS_BASE="${GN_ARGS_BASE} v8_use_external_startup_data=true"
-else
-  GN_ARGS_BASE="${GN_ARGS_BASE} v8_use_external_startup_data=false"
 fi
 
 if [[ "$BUILD_TYPE" = "Debug" ]]
@@ -105,16 +95,8 @@ function buildArch()
   echo "Build v8 ${arch} variant NO_INTL=${NO_INTL} NO_JIT=${NO_JIT}"
   gn gen --args="${GN_ARGS_BASE} ${GN_ARGS_BUILD_TYPE} v8_target_cpu=\"${arch}\" target_cpu=\"${arch}\"" "out.v8.${arch}"
 
-  if [[ ${TOOLS_ONLY} = "true" ]]; then
-    date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" run_mksnapshot_default mkcodecache_group ; date
-    copySnapshot $arch
-    copyMkcodecache $arch
- else
-    date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" ; date
-    copyLib $arch
-    copySnapshot $arch
-    # copyMkcodecache $arch
-  fi
+  date ; ninja ${NINJA_PARAMS} -C "out.v8.${arch}" ; date
+  copyLib $arch
 }
 
 function copyLib()
@@ -131,33 +113,6 @@ function copyLib()
   fi
 }
 
-function copySnapshot()
-{
-  local arch=$1
-  local platform_arch=$(normalize_arch_for_platform $arch)
-
-  mkdir -p "${BUILD_DIR}/tools/${PLATFORM}/${platform_arch}"
-  cp -f out.v8.${arch}/clang_*/mksnapshot "${BUILD_DIR}/tools/${PLATFORM}/${platform_arch}/mksnapshot"
-
-  if [[ ${EXTERNAL_STARTUP_DATA} = "true" || ${TOOLS_ONLY} = "true" ]]; then
-    mkdir -p "${BUILD_DIR}/snapshot_blob/${platform_arch}"
-    cp -f out.v8.${arch}/snapshot_blob.bin "${BUILD_DIR}/snapshot_blob/${platform_arch}/snapshot_blob.bin"
-  fi
-}
-
-function copyMkcodecache()
-{
-  local arch=$1
-  local platform_arch=$(normalize_arch_for_platform $arch)
-
-  mkdir -p "${BUILD_DIR}/tools/${PLATFORM}/${platform_arch}"
-  cp -f out.v8.${arch}/clang_*/mkcodecache "${BUILD_DIR}/tools/${PLATFORM}/${platform_arch}/mkcodecache"
-
-  if [[ ${EXTERNAL_STARTUP_DATA} = "true" || ${TOOLS_ONLY} = "true" ]]; then
-    cp -f out.v8.${arch}/clang_*/snapshot_blob.bin "${BUILD_DIR}/tools/${PLATFORM}/${platform_arch}/snapshot_blob.bin"
-  fi
-}
-
 if [[ ${ARCH} ]]; then
   buildArch "${ARCH}"
 elif [[ ${PLATFORM} = "android" ]]; then
@@ -168,9 +123,4 @@ elif [[ ${PLATFORM} = "android" ]]; then
 elif [[ ${PLATFORM} = "ios" ]]; then
   buildArch "arm64"
   # buildArch "x64"
-elif [[ ${PLATFORM} = "macos_android" ]]; then
-  # buildArch "arm"
-  # buildArch "x86"
-  buildArch "arm64"
-  buildArch "x64"
 fi
