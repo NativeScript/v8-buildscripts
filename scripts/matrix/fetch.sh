@@ -63,7 +63,13 @@ elif ! grep -q "'$PLATFORM'" .gclient; then
 fi
 
 checkpoint "Syncing"
-gclient sync --deps="$PLATFORM" --reset --with_branch_head \
+# No --deps here on purpose. Restricting the DEPS OS list to the target platform
+# also drops the *host* entries, and the linux sysroot hook is one of them --
+# which then fails gn gen with "Missing sysroot
+# (//build/linux/debian_bullseye_amd64-sysroot)" for the host toolchain that
+# torque and mksnapshot are built with. target_os in .gclient already selects
+# the target deps, and additionally keeping the host ones is what we want.
+gclient sync --reset --with_branch_head \
     --revision "$V8_VERSION" --delete_unversioned_trees
 
 checkpoint "Patching"
