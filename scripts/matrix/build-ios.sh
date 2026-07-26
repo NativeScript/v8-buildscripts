@@ -111,8 +111,20 @@ DIST="$ROOT_DIR/dist/ios-$VARIANT"
 cd "$V8_DIR"
 
 archive_lib() {
-    local name="$1" objects="$2"
+    local name="$1" objects="$2" first
     # shellcheck disable=SC2086 -- $objects is a deliberate glob list
+    first=$(ls $objects 2>/dev/null | head -1 || true)
+    if [ -z "$first" ]; then
+        # v8_heap_base_headers is header-only and compiles to nothing. The
+        # runtime still links the archive by name, so write an empty one --
+        # what ships today is an 8-byte archive for exactly this reason.
+        echo "note: $name has no objects, writing an empty archive"
+        # macOS ar refuses to create a memberless archive, so write the magic
+        # directly -- this is byte-identical to what ships today.
+        printf '!<arch>\n' > "$DIST/lib/$name.a"
+        return
+    fi
+    # shellcheck disable=SC2086
     ar r "$DIST/lib/$name.a" $objects
     strip -S -x "$DIST/lib/$name.a" 2>/dev/null || true
 }
