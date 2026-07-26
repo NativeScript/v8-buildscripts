@@ -95,6 +95,25 @@ jobs:
           path: v8-*-android-${{ matrix.abi }}.tar.gz
           retention-days: 7
 
+      # The internal headers are architecture-independent, so one job produces
+      # them. It piggybacks on a build rather than getting its own job because
+      # src/inspector/protocol/*.h are generated into gen/ and only exist once
+      # something has been built.
+      - name: Package the internal headers
+        if: matrix.abi == 'arm64-v8a'
+        run: |
+          scripts/matrix/package-src-headers.sh \
+            --gen-dir .v8/v8/out.gn/android-arm64-release/gen
+          tar -czf "v8-${{ needs.config.outputs.v8_version }}-src-headers.tar.gz" \
+            -C dist src-headers
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.abi == 'arm64-v8a'
+        with:
+          name: v8-src-headers
+          path: v8-*-src-headers.tar.gz
+          retention-days: 7
+
   ios:
     needs: config
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios' }}

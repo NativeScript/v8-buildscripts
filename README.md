@@ -66,6 +66,19 @@ the NativeScript framework itself is built per platform.
 Consumers map `ios-arm64-device` onto `arm64-xros` and `ios-arm64-simulator`
 onto `arm64-xrsimulator`.
 
+### The internal headers ship too
+
+Both runtimes' inspector glue compiles against `src/inspector`, `src/base`,
+`src/common` and the crdtp headers — none of which are public API, and all of
+which have to match the libraries or they are an ABI mismatch. A release
+therefore also carries `v8-<version>-src-headers.tar.gz`, so a consumer never
+needs a V8 checkout to re-vendor them.
+
+It ships the subtrees rather than a precomputed closure, because the set each
+runtime needs differs. It includes the generated `src/inspector/protocol/*.h`,
+which live in the build directory rather than the source tree but sit directly
+in the include path of `Forward.h`.
+
 ## Releasing
 
 The matrix runs on every push to `main` and on pull requests touching the build
