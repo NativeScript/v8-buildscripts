@@ -94,6 +94,12 @@ git push origin v8-14.9.207.39-1
 The build number after the V8 version lets the same V8 be re-released when only
 the build configuration changes.
 
+> **Do not tag a commit whose message contains `[skip ci]`.** GitHub evaluates
+> that marker against the head commit of *any* push, a tag push included, so the
+> tag lands but nothing builds and no release appears. If it happens, dispatching
+> the workflow with `--ref <tag>` produces the same result without retagging —
+> `github.ref` is still the tag, so the release job fires.
+
 Consumers pin a tag and verify against `SHA256SUMS` rather than trusting
 whatever the URL returns.
 
