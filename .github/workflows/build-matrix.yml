@@ -5,7 +5,7 @@ name: Build V8 matrix
 on:
   workflow_dispatch:
   push:
-    branches: [feat/full-matrix]
+    branches: [main]
     tags: ['v8-*']
   pull_request:
     paths:
@@ -16,6 +16,12 @@ on:
 
 permissions:
   contents: write
+
+# Nine jobs a run, several hours each -- superseded runs are not worth finishing.
+# Tags are excluded from cancellation so a release is never interrupted.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   config:
