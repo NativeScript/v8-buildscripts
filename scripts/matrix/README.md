@@ -32,15 +32,24 @@ not a return to one branch per arch.
 - Consequently the full set cannot be produced on any single machine, which is
   the main reason it belongs in CI rather than being assembled by hand.
 
-### visionOS is not covered
+### visionOS needs no build of its own
 
-`NativeScript/lib` contains `arm64-xros` and `arm64-xrsimulator`, but V8's build
-system has no visionOS support: `target_platform` accepts only `iphoneos` and
-`tvos`, and `target_environment` only `simulator`, `device` and `catalyst`.
-The iOS runtime's `build_v8_source.sh` lists `arm64-xrsimulator` in its arch
-array but produces no output directory for it. However those libraries are
-produced today, it is not through `target_environment`, so they are out of scope
-here until that is established.
+V8's build system has no visionOS support -- `target_platform` accepts only
+`iphoneos` and `tvos`, `target_environment` only `simulator`, `device` and
+`catalyst` -- and it does not need one. The iOS runtime's `arm64-xros` and
+`arm64-xrsimulator` library directories are byte-identical copies of
+`arm64-iphoneos` and `arm64-iphonesimulator`, tagged `platform 2` (iOS) in both
+places.
+
+That works because the platform tag on a member of a *static* archive is
+advisory: only the final linked image carries an `LC_BUILD_VERSION`, and the
+linker takes that from the link invocation. So a visionOS binary links the iOS
+V8 archives happily, and only the NativeScript framework itself is built per
+platform.
+
+The five Apple variants here are therefore the complete set. Consumers map
+`ios-arm64-device` onto `arm64-xros` and `ios-arm64-simulator` onto
+`arm64-xrsimulator`.
 
 ## Releasing
 
