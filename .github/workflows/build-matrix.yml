@@ -1,0 +1,158 @@
+name: Build V8 matrix
+
+# Runs on demand and on every push to the branch so the matrix is verified
+# before anything is tagged. Pushing a tag additionally cuts a release.
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/full-matrix]
+    tags: ['v8-*']
+  pull_request:
+    paths:
+      - 'config.env'
+      - 'patches/**'
+      - 'scripts/matrix/**'
+      - '.github/workflows/build-matrix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  config:
+    runs-on: ubuntu-24.04
+    outputs:
+      v8_version: ${{ steps.cfg.outputs.v8_version }}
+      ndk_release: ${{ steps.cfg.outputs.ndk_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          set -a; . ./config.env; set +a
+          echo "v8_version=$V8_VERSION"      >> "$GITHUB_OUTPUT"
+          echo "ndk_release=$ANDROID_NDK_RELEASE" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64, armeabi-v7a, x86]
+    steps:
+      - uses: actions/checkout@v4
+
+      # A 32-bit target builds mksnapshot and the bytecode-builtins generator
+      # as 32-bit x86 host binaries. Without the i386 runtime they link and
+      # then fail to execute, which surfaces only as a failed
+      # generate_bytecode_builtins_list action.
+      - name: Enable i386 multiarch
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libc6:i386 libstdc++6:i386 libatomic1:i386 zlib1g:i386 rsync
+
+      - name: Install the Android NDK ${{ needs.config.outputs.ndk_release }}
+        run: |
+          curl -fsSL -o /tmp/ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-${{ needs.config.outputs.ndk_release }}-linux.zip"
+          unzip -q /tmp/ndk.zip -d "$HOME"
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk-${{ needs.config.outputs.ndk_release }}" >> "$GITHUB_ENV"
+
+      - name: Install depot_tools
+        run: |
+          git clone -q --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
+          echo "$HOME/depot_tools" >> "$GITHUB_PATH"
+
+      - name: Fetch and patch V8
+        run: scripts/matrix/fetch.sh --platform android
+
+      - name: Build ${{ matrix.abi }}
+        run: scripts/matrix/build-android.sh --abi ${{ matrix.abi }}
+
+      - name: Package
+        run: |
+          tar -czf "v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz" \
+            -C dist "android-${{ matrix.abi }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v8-android-${{ matrix.abi }}
+          path: v8-*-android-${{ matrix.abi }}.tar.gz
+          retention-days: 7
+
+  ios:
+    needs: config
+    runs-on: macos-15
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [arm64-device, arm64-simulator, x64-simulator, arm64-catalyst, x64-catalyst]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install depot_tools
+        run: |
+          git clone -q --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
+          echo "$HOME/depot_tools" >> "$GITHUB_PATH"
+
+      - name: Fetch and patch V8
+        run: scripts/matrix/fetch.sh --platform ios
+
+      - name: Build ${{ matrix.variant }}
+        run: scripts/matrix/build-ios.sh --variant ${{ matrix.variant }}
+
+      - name: Package
+        run: |
+          tar -czf "v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz" \
+            -C dist "ios-${{ matrix.variant }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v8-ios-${{ matrix.variant }}
+          path: v8-*-ios-${{ matrix.variant }}.tar.gz
+          retention-days: 7
+
+  release:
+    needs: [config, android, ios]
+    if: startsWith(github.ref, 'refs/tags/v8-')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # The checksums are the point of shipping this way: consumers pin a tag
+      # and verify the archive rather than trusting whatever the URL returns.
+      - name: Generate checksums
+        working-directory: artifacts
+        run: |
+          sha256sum *.tar.gz | tee SHA256SUMS
+          ls -la
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "V8 \`${{ needs.config.outputs.v8_version }}\` built from \`${GITHUB_SHA}\`."
+            echo
+            echo "Built against Android NDK \`${{ needs.config.outputs.ndk_release }}\`; it must match the"
+            echo "NDK the Android runtime is built with, because libc++ is only ABI-compatible"
+            echo "with itself across a static link."
+            echo
+            echo "Patches applied: \`v8_resurrecting_finalizers.patch\` (restores"
+            echo "\`WeakCallbackType::kFinalizer\`), \`android_build.patch\` (API 21 floor,"
+            echo "selectable \`android_ndk_root\`, macOS host support)."
+            echo
+            echo "Verify with \`sha256sum -c SHA256SUMS\`. The gn args are in \`scripts/matrix/build-*.sh\`."
+          } > notes.md
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            artifacts/*.tar.gz artifacts/SHA256SUMS
