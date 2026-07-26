@@ -36,7 +36,7 @@ jobs:
       v8_version: ${{ steps.cfg.outputs.v8_version }}
       ndk_release: ${{ steps.cfg.outputs.ndk_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: cfg
         run: |
           set -a; . ./config.env; set +a
@@ -53,7 +53,7 @@ jobs:
       matrix:
         abi: [arm64-v8a, x86_64, armeabi-v7a, x86]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A 32-bit target builds mksnapshot and the bytecode-builtins generator
       # as 32-bit x86 host binaries. Without the i386 runtime they link and
@@ -89,7 +89,7 @@ jobs:
           tar -czf "v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz" \
             -C dist "android-${{ matrix.abi }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: v8-android-${{ matrix.abi }}
           path: v8-*-android-${{ matrix.abi }}.tar.gz
@@ -107,7 +107,7 @@ jobs:
           tar -czf "v8-${{ needs.config.outputs.v8_version }}-src-headers.tar.gz" \
             -C dist src-headers
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: matrix.abi == 'arm64-v8a'
         with:
           name: v8-src-headers
@@ -124,7 +124,7 @@ jobs:
       matrix:
         variant: [arm64-device, arm64-simulator, x64-simulator, arm64-catalyst, x64-catalyst]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install depot_tools
         run: |
@@ -142,7 +142,7 @@ jobs:
           tar -czf "v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz" \
             -C dist "ios-${{ matrix.variant }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: v8-ios-${{ matrix.variant }}
           path: v8-*-ios-${{ matrix.variant }}.tar.gz
@@ -153,9 +153,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v8-')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
