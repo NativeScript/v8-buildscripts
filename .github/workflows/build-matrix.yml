@@ -4,6 +4,12 @@ name: Build V8 matrix
 # before anything is tagged. Pushing a tag additionally cuts a release.
 on:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which platforms to build
+        type: choice
+        options: [all, android, ios]
+        default: all
   push:
     branches: [main]
     tags: ['v8-*']
@@ -39,6 +45,7 @@ jobs:
 
   android:
     needs: config
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'android' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
@@ -90,6 +97,7 @@ jobs:
 
   ios:
     needs: config
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios' }}
     runs-on: macos-15
     timeout-minutes: 300
     strategy:
