@@ -111,10 +111,15 @@ DIST="$ROOT_DIR/dist/ios-$VARIANT"
 cd "$V8_DIR"
 
 archive_lib() {
-    local name="$1" objects="$2" first
-    # shellcheck disable=SC2086 -- $objects is a deliberate glob list
-    first=$(ls $objects 2>/dev/null | head -1 || true)
-    if [ -z "$first" ]; then
+    local name="$1" objects="$2" o
+    local existing=()
+    # Filter to what actually exists. Not every target is produced by every
+    # configuration -- catalyst omits some of the arm64 zlib SIMD variants, for
+    # instance -- and a glob that matches nothing would otherwise be handed to
+    # ar verbatim.
+    # shellcheck disable=SC2086 -- deliberate glob expansion
+    for o in $objects; do [ -e "$o" ] && existing+=("$o"); done
+    if [ ${#existing[@]} -eq 0 ]; then
         # v8_heap_base_headers is header-only and compiles to nothing. The
         # runtime still links the archive by name, so write an empty one --
         # what ships today is an 8-byte archive for exactly this reason.
@@ -124,8 +129,7 @@ archive_lib() {
         printf '!<arch>\n' > "$DIST/lib/$name.a"
         return
     fi
-    # shellcheck disable=SC2086
-    ar r "$DIST/lib/$name.a" $objects
+    ar r "$DIST/lib/$name.a" "${existing[@]}"
     strip -S -x "$DIST/lib/$name.a" 2>/dev/null || true
 }
 
