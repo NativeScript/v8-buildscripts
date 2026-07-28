@@ -127,7 +127,7 @@ platform), dispatch the workflow with `platforms: android` or `platforms: ios`.
 
 | Patch | Why |
 |---|---|
-| `v8_resurrecting_finalizers.patch` | Restores `WeakCallbackType::kFinalizer`, removed upstream immediately after 10.3.22. Both runtimes' object managers depend on resurrecting finalizers. |
+| `v8_resurrecting_finalizers.patch` | Restores `WeakCallbackType::kFinalizer`, removed upstream immediately after 10.3.22. Both runtimes' object managers depend on resurrecting finalizers. It also lifts, for the finalizer drain only, the `DisallowJavascriptExecution` scope that `Heap::CollectGarbage` now holds across the whole collection: 14.9 turns entering JS from a GC callback into a `GRACEFUL_FATAL`, and the iOS runtime reaches JS whenever a released ObjC object's `-dealloc` hits a JS-backed override. |
 | `android_build.patch` | Lowers chromium's minimum SDK to 21 (that floor is for Java/dex tooling; this builds only the native target), makes `android_ndk_root` a gn arg, and widens the hard Linux-host assert so macOS can build the 64-bit ABIs. |
 
 ## The gn args are load-bearing

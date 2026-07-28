@@ -21,7 +21,7 @@ index ad2ae1f4517..c2c76af2830 100644
  
  template <class T>
 diff --git a/src/handles/global-handles.cc b/src/handles/global-handles.cc
-index e03603371cd..481e317df87 100644
+index e03603371cd..ad2172fdd5e 100644
 --- a/src/handles/global-handles.cc
 +++ b/src/handles/global-handles.cc
 @@ -55,6 +55,11 @@ enum class WeaknessType {
@@ -242,16 +242,25 @@ index e03603371cd..481e317df87 100644
  void GlobalHandles::PostGarbageCollectionProcessing(
      v8::GCCallbackFlags gc_callback_flags) {
    // Process weak global handle callbacks. This must be done after the
-@@ -874,6 +986,8 @@ void GlobalHandles::PostGarbageCollectionProcessing(
+@@ -874,6 +986,17 @@ void GlobalHandles::PostGarbageCollectionProcessing(
    // API functions.
    DCHECK_EQ(Heap::NOT_IN_GC, isolate_->heap()->gc_state());
  
-+  InvokeFinalizerCallbacks();
++  {
++    // `Heap::CollectGarbage` holds a `DisallowJavascriptExecution` across the
++    // whole collection, including the epilogue this runs from, and
++    // `InvokeExternalCallbacks()` re-enables allocation but deliberately not
++    // JS. Finalizer callbacks are documented to permit both (see
++    // `v8::WeakCallbackType::kFinalizer`), so lift it for them alone -- the
++    // second-pass callbacks below assert that JS is still disallowed.
++    AllowJavascriptExecution allow_js(isolate_);
++    InvokeFinalizerCallbacks();
++  }
 +
    if (second_pass_callbacks_.empty()) return;
  
    const bool synchronous_second_pass =
-@@ -902,7 +1016,10 @@ void GlobalHandles::PostGarbageCollectionProcessing(
+@@ -902,7 +1025,10 @@ void GlobalHandles::PostGarbageCollectionProcessing(
  
  void GlobalHandles::IterateStrongRoots(RootVisitor* v) {
    for (Node* node : *regular_nodes_) {
