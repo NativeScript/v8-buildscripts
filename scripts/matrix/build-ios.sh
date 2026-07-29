@@ -70,6 +70,17 @@ MODULES=(
 # iOS proper cannot JIT, so it is built in lite mode. Catalyst runs on macOS,
 # where JIT is permitted, and is deliberately not lite -- keeping the two arg
 # sets distinct preserves what each currently ships.
+#
+# cppgc_enable_caged_heap=false is load-bearing and not implied by anything
+# else here. It defaults to true on arm64 ("Enable heap reservation of size
+# 4GB") independently of v8_enable_pointer_compression, and enabling it forces
+# cppgc_enable_pointer_compression on, whose reservation path asks for twice
+# the cage to satisfy alignment. V8::Initialize() calls cppgc::InitializeProcess
+# unconditionally, so every app reserved 8 GiB of 4 GiB-aligned address space at
+# startup whether or not it used cppgc. iOS budgets virtual address space per
+# process by device RAM, so that reservation fails outright on smaller devices
+# -- four tries, then Oilpan's fatal OOM handler, before any JS runs. It crashed
+# on an iPad Air while an iPad Pro was fine.
 GN_ARGS="
     target_os=\"ios\"
     treat_warnings_as_errors=false
@@ -89,6 +100,7 @@ GN_ARGS="
     v8_enable_pointer_compression=false
     v8_enable_v8_checks=false
     v8_enable_webassembly=false
+    cppgc_enable_caged_heap=false
     symbol_level=0
 "
 

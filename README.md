@@ -133,7 +133,22 @@ platform), dispatch the workflow with `platforms: android` or `platforms: ios`.
 ## The gn args are load-bearing
 
 They are commented at their definition in `scripts/matrix/build-android.sh` and
-`scripts/matrix/build-ios.sh`. Two worth knowing:
+`scripts/matrix/build-ios.sh`. Three worth knowing:
+
+- `cppgc_enable_caged_heap=false` (iOS only) — it defaults to **true on arm64**
+  and, contrary to how the flags read, does *not* track
+  `v8_enable_pointer_compression`; enabling it forces cppgc's own pointer
+  compression on, whose reservation asks for twice the cage to satisfy
+  alignment. Since `V8::Initialize()` calls `cppgc::InitializeProcess`
+  unconditionally, every app reserved **8 GiB of 4 GiB-aligned address space** at
+  startup regardless of whether it used cppgc. iOS budgets virtual address space
+  per process by device RAM, so on smaller devices that reservation simply fails
+  and Oilpan's fatal OOM handler aborts the process before any JS runs — an iPad
+  Air crashed on launch while an iPad Pro was fine. Turning it off costs cppgc
+  pointer compression (`Member<T>` becomes 8 bytes), the cppgc young generation,
+  and a write-barrier fast path; it costs nothing in API, and `CppHeap` and
+  unified heap tracing are unaffected. Android keeps the cage: 64-bit ABIs have
+  the address space for it, and it is unavailable on the 32-bit ones anyway.
 
 - `v8_array_buffer_internal_field_count=2` — defaulted to 2 in 10.3 and defaults
   to 0 in 14.9. The Android runtime links a `JSInstanceInfo` into internal field
