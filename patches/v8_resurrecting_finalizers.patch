@@ -21,7 +21,7 @@ index ad2ae1f4517..c2c76af2830 100644
  
  template <class T>
 diff --git a/src/handles/global-handles.cc b/src/handles/global-handles.cc
-index e03603371cd..ad2172fdd5e 100644
+index e03603371cd..307a72a7b46 100644
 --- a/src/handles/global-handles.cc
 +++ b/src/handles/global-handles.cc
 @@ -55,6 +55,11 @@ enum class WeaknessType {
@@ -156,7 +156,7 @@ index e03603371cd..ad2172fdd5e 100644
    if (!should_reset_handle(isolate()->heap(), node->location())) return false;
  
    switch (node->weakness_type()) {
-@@ -705,10 +765,32 @@ V8_INLINE bool GlobalHandles::ResetWeakNodeIfDead(
+@@ -705,10 +765,41 @@ V8_INLINE bool GlobalHandles::ResetWeakNodeIfDead(
      case WeaknessType::kCallbackWithTwoEmbedderFields:
        node->CollectPhantomCallbackData(&pending_phantom_callbacks_);
        break;
@@ -181,15 +181,24 @@ index e03603371cd..ad2172fdd5e 100644
 +
 +DISABLE_CFI_PERF
 +void GlobalHandles::IterateFinalizerHandlesAsRoots(RootVisitor* v) {
++  // An entry can go stale between queueing and the drain: callbacks running
++  // outside the pause may reset or re-arm a queued handle, which clears the
++  // pending bit -- and a reset frees the node, whose zapped location must
++  // never be visited as a root. The bit, not the queue, is the source of truth
++  // (the drain re-checks it the same way); compact stale entries out here.
++  size_t last = 0;
 +  for (Node* node : pending_finalizers_) {
++    if (!node->pending_finalizer()) continue;
 +    v->VisitRootPointer(Root::kGlobalHandles, node->label(), node->location());
++    pending_finalizers_[last++] = node;
 +  }
++  pending_finalizers_.resize(last);
 +}
 +
  DISABLE_CFI_PERF
  void GlobalHandles::IterateWeakRootsForPhantomHandles(
      WeakSlotCallbackWithHeap should_reset_handle) {
-@@ -719,7 +801,10 @@ void GlobalHandles::IterateWeakRootsForPhantomHandles(
+@@ -719,7 +810,10 @@ void GlobalHandles::IterateWeakRootsForPhantomHandles(
  
  void GlobalHandles::IterateYoungStrongAndDependentRoots(RootVisitor* v) {
    for (Node* node : young_nodes_) {
@@ -201,7 +210,7 @@ index e03603371cd..ad2172fdd5e 100644
        v->VisitRootPointer(Root::kGlobalHandles, node->label(),
                            node->location());
      }
-@@ -731,6 +816,9 @@ void GlobalHandles::ProcessWeakYoungObjects(
+@@ -731,6 +825,9 @@ void GlobalHandles::ProcessWeakYoungObjects(
    for (Node* node : young_nodes_) {
      DCHECK(node->is_in_young_list());
  
@@ -211,7 +220,7 @@ index e03603371cd..ad2172fdd5e 100644
      if (node->IsWeakRetainer() &&
          !ResetWeakNodeIfDead(node, should_reset_handle)) {
        // Node is weak and alive, so it should be passed onto the visitor if
-@@ -867,6 +955,30 @@ void GlobalHandles::PendingPhantomCallback::Invoke(Isolate* isolate,
+@@ -867,6 +964,30 @@ void GlobalHandles::PendingPhantomCallback::Invoke(Isolate* isolate,
    callback(data);
  }
  
@@ -242,7 +251,7 @@ index e03603371cd..ad2172fdd5e 100644
  void GlobalHandles::PostGarbageCollectionProcessing(
      v8::GCCallbackFlags gc_callback_flags) {
    // Process weak global handle callbacks. This must be done after the
-@@ -874,6 +986,17 @@ void GlobalHandles::PostGarbageCollectionProcessing(
+@@ -874,6 +995,17 @@ void GlobalHandles::PostGarbageCollectionProcessing(
    // API functions.
    DCHECK_EQ(Heap::NOT_IN_GC, isolate_->heap()->gc_state());
  
@@ -260,7 +269,7 @@ index e03603371cd..ad2172fdd5e 100644
    if (second_pass_callbacks_.empty()) return;
  
    const bool synchronous_second_pass =
-@@ -902,7 +1025,10 @@ void GlobalHandles::PostGarbageCollectionProcessing(
+@@ -902,7 +1034,10 @@ void GlobalHandles::PostGarbageCollectionProcessing(
  
  void GlobalHandles::IterateStrongRoots(RootVisitor* v) {
    for (Node* node : *regular_nodes_) {
