@@ -71,6 +71,14 @@ MODULES=(
 # where JIT is permitted, and is deliberately not lite -- keeping the two arg
 # sets distinct preserves what each currently ships.
 #
+# v8_expose_public_symbols marks the V8_EXPORT API default-visibility. Plugins
+# (e.g. @nativescript/canvas) compile against the vendored V8 headers and
+# resolve v8:: symbols against NativeScript.framework at the app link, and
+# ld64 cannot export a symbol these objects hide: Chromium compiles with
+# -fvisibility=hidden by default, and the gni/v8.gni swap to default
+# visibility only fires for backtrace or monolithic builds, neither of which
+# applies here.
+#
 # cppgc_enable_caged_heap=false is load-bearing and not implied by anything
 # else here. It defaults to true on arm64 ("Enable heap reservation of size
 # 4GB") independently of v8_enable_pointer_compression, and enabling it forces
@@ -92,6 +100,7 @@ GN_ARGS="
     v8_control_flow_integrity=false
     v8_monolithic=false
     v8_static_library=true
+    v8_expose_public_symbols=true
     v8_use_external_startup_data=false
     v8_enable_sandbox=false
     v8_enable_debugging_features=false
