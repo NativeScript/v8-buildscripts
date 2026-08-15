@@ -339,7 +339,7 @@ diff --git a/src/heap/mark-compact.cc b/src/heap/mark-compact.cc
 index b65cd3af3e0..d81667a115e 100644
 --- a/src/heap/mark-compact.cc
 +++ b/src/heap/mark-compact.cc
-@@ -2661,6 +2661,31 @@ void MarkCompactCollector::MarkLiveObjects() {
+@@ -2661,6 +2661,43 @@ void MarkCompactCollector::MarkLiveObjects() {
      VerifyEphemeronMarking();
    }
  
@@ -359,13 +359,25 @@ index b65cd3af3e0..d81667a115e 100644
 +        &IsUnmarkedHeapObject);
 +    heap_->isolate()->global_handles()->IterateFinalizerHandlesAsRoots(
 +        &root_visitor);
++    // Once the closure above ends in `MarkTransitiveClosureLinear()`,
++    // unresolved ephemerons live in `key_to_values_`, which only the
++    // `kProcessRememberedEphemerons` worklist mode consults. Draining the
++    // resurrected closure in any other mode marks a resurrected WeakMap key
++    // while leaving its value unmarked; `ClearWeakCollections()` tests only
++    // the key, so the entry survives with a dangling value slot. When the
++    // closure reached its fixpoint instead, the map is empty and this is a
++    // plain worklist drain.
++    ReachTransitiveClosureWithEmbedder<
++        MarkingWorklistProcessingMode::kProcessRememberedEphemerons>();
 +    if (!MarkTransitiveClosureFixpoint()) {
 +      MarkTransitiveClosureLinear();
 +    }
++    local_weak_objects()->ephemeron_hash_tables_local.Publish();
 +    CHECK(local_marking_worklists_->IsEmpty());
 +    CHECK(
 +        local_weak_objects()->current_ephemerons_local.IsLocalAndGlobalEmpty());
 +    CHECK(IsCppHeapMarkingFinished(heap_, local_marking_worklists_.get()));
++    VerifyEphemeronMarking();
 +  }
 +
    if (was_marked_incrementally) {
