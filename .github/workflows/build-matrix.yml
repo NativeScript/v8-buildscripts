@@ -23,6 +23,9 @@ on:
 permissions:
   contents: write
 
+env:
+  SCCACHE_VERSION: 0.10.0
+
 # Nine jobs a run, several hours each -- superseded runs are not worth finishing.
 # Tags are excluded from cancellation so a release is never interrupted.
 concurrency:
@@ -35,6 +38,7 @@ jobs:
     outputs:
       v8_version: ${{ steps.cfg.outputs.v8_version }}
       ndk_release: ${{ steps.cfg.outputs.ndk_release }}
+      inputs_hash: ${{ steps.cfg.outputs.inputs_hash }}
     steps:
       - uses: actions/checkout@v7
       - id: cfg
@@ -42,6 +46,11 @@ jobs:
           set -a; . ./config.env; set +a
           echo "v8_version=$V8_VERSION"      >> "$GITHUB_OUTPUT"
           echo "ndk_release=$ANDROID_NDK_RELEASE" >> "$GITHUB_OUTPUT"
+          # Everything the artifacts are a function of, hashed by blob id.
+          # Commits with an unchanged hash produce identical artifacts, so a
+          # finished build in R2 can be reused instead of repeated.
+          echo "inputs_hash=$(git ls-files -s config.env patches scripts/matrix .github/workflows/build-matrix.yml \
+            | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
 
   android:
     needs: config
@@ -52,14 +61,54 @@ jobs:
       fail-fast: false
       matrix:
         abi: [arm64-v8a, x86_64, armeabi-v7a, x86]
+    # The R2 bucket has two prefixes with separate lifecycle rules:
+    # artifacts/<inputs-hash>/ holds finished tarballs (expired quickly; a miss
+    # just means building, as before) and sccache/ holds the compiler cache
+    # (kept long). Every R2 step is skipped when the secrets are absent, e.g.
+    # on a fork PR, and the build then runs exactly as it would without R2.
+    env:
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      # aws-cli >= 2.23 defaults to CRC checksums R2 rejects.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      SCCACHE_BUCKET: ${{ vars.R2_BUCKET }}
+      SCCACHE_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      SCCACHE_REGION: auto
+      SCCACHE_S3_KEY_PREFIX: sccache
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check R2 for prebuilt artifacts
+        id: cache
+        if: env.AWS_ACCESS_KEY_ID != ''
+        run: |
+          keys="v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz"
+          if [ "${{ matrix.abi }}" = "arm64-v8a" ]; then
+            keys="$keys v8-${{ needs.config.outputs.v8_version }}-src-headers.tar.gz"
+          fi
+          prefix="artifacts/${{ needs.config.outputs.inputs_hash }}"
+          hit=true
+          for k in $keys; do
+            aws s3api head-object --endpoint-url "$R2_ENDPOINT" \
+              --bucket "$R2_BUCKET" --key "$prefix/$k" >/dev/null 2>&1 || hit=false
+          done
+          if [ "$hit" = true ]; then
+            for k in $keys; do
+              aws s3 cp --endpoint-url "$R2_ENDPOINT" "s3://$R2_BUCKET/$prefix/$k" "$k"
+            done
+          fi
+          echo "hit=$hit" >> "$GITHUB_OUTPUT"
 
       # A 32-bit target builds mksnapshot and the bytecode-builtins generator
       # as 32-bit x86 host binaries. Without the i386 runtime they link and
       # then fail to execute, which surfaces only as a failed
       # generate_bytecode_builtins_list action.
       - name: Enable i386 multiarch
+        if: steps.cache.outputs.hit != 'true'
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
@@ -67,6 +116,7 @@ jobs:
             libc6:i386 libstdc++6:i386 libatomic1:i386 zlib1g:i386 rsync
 
       - name: Install the Android NDK ${{ needs.config.outputs.ndk_release }}
+        if: steps.cache.outputs.hit != 'true'
         run: |
           curl -fsSL -o /tmp/ndk.zip \
             "https://dl.google.com/android/repository/android-ndk-${{ needs.config.outputs.ndk_release }}-linux.zip"
@@ -74,38 +124,65 @@ jobs:
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-${{ needs.config.outputs.ndk_release }}" >> "$GITHUB_ENV"
 
       - name: Install depot_tools
+        if: steps.cache.outputs.hit != 'true'
         run: |
           git clone -q --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
           echo "$HOME/depot_tools" >> "$GITHUB_PATH"
 
+      - name: Install sccache
+        if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
+        run: |
+          curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          install "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Fetch and patch V8
-        run: scripts/matrix/fetch.sh --platform android
+        if: steps.cache.outputs.hit != 'true'
+        run: scripts/matrix/fetch.sh --platform android --no-history
 
       - name: Build ${{ matrix.abi }}
-        run: scripts/matrix/build-android.sh --abi ${{ matrix.abi }}
+        if: steps.cache.outputs.hit != 'true'
+        run: >
+          scripts/matrix/build-android.sh --abi ${{ matrix.abi }}
+          ${{ env.AWS_ACCESS_KEY_ID != '' && '--cc-wrapper sccache' || '' }}
+
+      - name: sccache stats
+        if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
+        run: sccache --show-stats
 
       - name: Package
+        if: steps.cache.outputs.hit != 'true'
         run: |
           tar -czf "v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz" \
             -C dist "android-${{ matrix.abi }}"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: v8-android-${{ matrix.abi }}
-          path: v8-*-android-${{ matrix.abi }}.tar.gz
-          retention-days: 7
 
       # The internal headers are architecture-independent, so one job produces
       # them. It piggybacks on a build rather than getting its own job because
       # src/inspector/protocol/*.h are generated into gen/ and only exist once
       # something has been built.
       - name: Package the internal headers
-        if: matrix.abi == 'arm64-v8a'
+        if: matrix.abi == 'arm64-v8a' && steps.cache.outputs.hit != 'true'
         run: |
           scripts/matrix/package-src-headers.sh \
             --gen-dir .v8/v8/out.gn/android-arm64-release/gen
           tar -czf "v8-${{ needs.config.outputs.v8_version }}-src-headers.tar.gz" \
             -C dist src-headers
+
+      - name: Upload the artifacts to R2
+        if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
+        run: |
+          prefix="artifacts/${{ needs.config.outputs.inputs_hash }}"
+          for f in v8-*.tar.gz; do
+            aws s3 cp --endpoint-url "$R2_ENDPOINT" "$f" "s3://$R2_BUCKET/$prefix/$f"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: v8-android-${{ matrix.abi }}
+          path: v8-*-android-${{ matrix.abi }}.tar.gz
+          retention-days: 7
 
       - uses: actions/upload-artifact@v7
         if: matrix.abi == 'arm64-v8a'
@@ -123,24 +200,77 @@ jobs:
       fail-fast: false
       matrix:
         variant: [arm64-device, arm64-simulator, x64-simulator, arm64-catalyst, x64-catalyst]
+    # See the android job for the R2 bucket layout and the missing-secrets
+    # fallback; this job mirrors it.
+    env:
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      SCCACHE_BUCKET: ${{ vars.R2_BUCKET }}
+      SCCACHE_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      SCCACHE_REGION: auto
+      SCCACHE_S3_KEY_PREFIX: sccache
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check R2 for a prebuilt artifact
+        id: cache
+        if: env.AWS_ACCESS_KEY_ID != ''
+        run: |
+          key="artifacts/${{ needs.config.outputs.inputs_hash }}/v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz"
+          if aws s3api head-object --endpoint-url "$R2_ENDPOINT" \
+              --bucket "$R2_BUCKET" --key "$key" >/dev/null 2>&1; then
+            aws s3 cp --endpoint-url "$R2_ENDPOINT" "s3://$R2_BUCKET/$key" .
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install depot_tools
+        if: steps.cache.outputs.hit != 'true'
         run: |
           git clone -q --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$HOME/depot_tools"
           echo "$HOME/depot_tools" >> "$GITHUB_PATH"
 
+      - name: Install sccache
+        if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
+        run: |
+          curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin.tar.gz" \
+            | tar -xz -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          install "/tmp/sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin/sccache" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Fetch and patch V8
-        run: scripts/matrix/fetch.sh --platform ios
+        if: steps.cache.outputs.hit != 'true'
+        run: scripts/matrix/fetch.sh --platform ios --no-history
 
       - name: Build ${{ matrix.variant }}
-        run: scripts/matrix/build-ios.sh --variant ${{ matrix.variant }}
+        if: steps.cache.outputs.hit != 'true'
+        run: >
+          scripts/matrix/build-ios.sh --variant ${{ matrix.variant }}
+          ${{ env.AWS_ACCESS_KEY_ID != '' && '--cc-wrapper sccache' || '' }}
+
+      - name: sccache stats
+        if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
+        run: sccache --show-stats
 
       - name: Package
+        if: steps.cache.outputs.hit != 'true'
         run: |
           tar -czf "v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz" \
             -C dist "ios-${{ matrix.variant }}"
+
+      - name: Upload the artifact to R2
+        if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
+        run: |
+          f="v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz"
+          aws s3 cp --endpoint-url "$R2_ENDPOINT" "$f" \
+            "s3://$R2_BUCKET/artifacts/${{ needs.config.outputs.inputs_hash }}/$f"
 
       - uses: actions/upload-artifact@v7
         with:

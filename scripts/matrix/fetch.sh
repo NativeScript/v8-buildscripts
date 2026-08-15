@@ -14,14 +14,18 @@ source "$ROOT_DIR/config.env"
 
 PLATFORM=""
 V8_PARENT="$ROOT_DIR/.v8"
+NO_HISTORY=""
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") --platform <android|ios> [--v8-dir <path>]
+Usage: $(basename "$0") --platform <android|ios> [--v8-dir <path>] [--no-history]
 
   --platform       Which DEPS set to sync and which patches to apply.
   --v8-dir <path>  Directory to hold the checkout (default: $V8_PARENT).
                    Sources land in <path>/v8.
+  --no-history     Shallow-fetch every repo in the DEPS tree. Leaves a checkout
+                   that later syncs to a different version may have to re-fetch,
+                   so best suited to throwaway checkouts.
 EOF
 }
 
@@ -31,6 +35,7 @@ while [ $# -gt 0 ]; do
         --platform=*) PLATFORM="${1#*=}"; shift ;;
         --v8-dir)     V8_PARENT="$2"; shift 2 ;;
         --v8-dir=*)   V8_PARENT="${1#*=}"; shift ;;
+        --no-history) NO_HISTORY="--no-history"; shift ;;
         -h|--help)    usage; exit 0 ;;
         *)            echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
     esac
@@ -69,7 +74,7 @@ checkpoint "Syncing"
 # (//build/linux/debian_bullseye_amd64-sysroot)" for the host toolchain that
 # torque and mksnapshot are built with. target_os in .gclient already selects
 # the target deps, and additionally keeping the host ones is what we want.
-gclient sync --reset --with_branch_head \
+gclient sync --reset --with_branch_head $NO_HISTORY \
     --revision "$V8_VERSION" --delete_unversioned_trees
 
 checkpoint "Patching"

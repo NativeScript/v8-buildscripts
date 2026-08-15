@@ -13,27 +13,33 @@ source "$ROOT_DIR/config.env"
 V8_DIR="$ROOT_DIR/.v8/v8"
 NDK_ROOT=""
 ABI=""
+CC_WRAPPER=""
 NINJA_ARGS=()
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") --abi <abi> [--v8-dir <path>] [--ndk-root <path>] [-- <ninja args>]
+Usage: $(basename "$0") --abi <abi> [--v8-dir <path>] [--ndk-root <path>]
+                        [--cc-wrapper <bin>] [-- <ninja args>]
 
-  --abi <abi>        armeabi-v7a | arm64-v8a | x86 | x86_64
-  --v8-dir <path>    V8 sources (default: $V8_DIR)
-  --ndk-root <path>  NDK to build against; must be the same one the runtime is
-                     built with. Defaults to \$ANDROID_NDK_ROOT.
+  --abi <abi>         armeabi-v7a | arm64-v8a | x86 | x86_64
+  --v8-dir <path>     V8 sources (default: $V8_DIR)
+  --ndk-root <path>   NDK to build against; must be the same one the runtime is
+                      built with. Defaults to \$ANDROID_NDK_ROOT.
+  --cc-wrapper <bin>  Compiler launcher (e.g. sccache), passed to gn as
+                      cc_wrapper. Must be on PATH.
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --abi)        ABI="$2"; shift 2 ;;
-        --abi=*)      ABI="${1#*=}"; shift ;;
-        --v8-dir)     V8_DIR="$2"; shift 2 ;;
-        --v8-dir=*)   V8_DIR="${1#*=}"; shift ;;
-        --ndk-root)   NDK_ROOT="$2"; shift 2 ;;
-        --ndk-root=*) NDK_ROOT="${1#*=}"; shift ;;
+        --abi)          ABI="$2"; shift 2 ;;
+        --abi=*)        ABI="${1#*=}"; shift ;;
+        --v8-dir)       V8_DIR="$2"; shift 2 ;;
+        --v8-dir=*)     V8_DIR="${1#*=}"; shift ;;
+        --ndk-root)     NDK_ROOT="$2"; shift 2 ;;
+        --ndk-root=*)   NDK_ROOT="${1#*=}"; shift ;;
+        --cc-wrapper)   CC_WRAPPER="$2"; shift 2 ;;
+        --cc-wrapper=*) CC_WRAPPER="${1#*=}"; shift ;;
         --)           shift; NINJA_ARGS=("$@"); break ;;
         -h|--help)    usage; exit 0 ;;
         *)            echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -115,6 +121,10 @@ GN_ARGS="
     v8_enable_debugging_features=false
     v8_control_flow_integrity=false
 "
+
+if [ -n "$CC_WRAPPER" ]; then
+    GN_ARGS="$GN_ARGS cc_wrapper=\"$CC_WRAPPER\""
+fi
 
 OUTFOLDER="out.gn/android-$CPU-release"
 DIST="$ROOT_DIR/dist/android-$ABI"

@@ -19,23 +19,29 @@ source "$ROOT_DIR/config.env"
 
 V8_DIR="$ROOT_DIR/.v8/v8"
 VARIANT=""
+CC_WRAPPER=""
 NINJA_ARGS=()
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") --variant <variant> [--v8-dir <path>] [-- <ninja args>]
+Usage: $(basename "$0") --variant <variant> [--v8-dir <path>]
+                        [--cc-wrapper <bin>] [-- <ninja args>]
 
-  --variant   arm64-device | arm64-simulator | x64-simulator
-              | arm64-catalyst | x64-catalyst
+  --variant           arm64-device | arm64-simulator | x64-simulator
+                      | arm64-catalyst | x64-catalyst
+  --cc-wrapper <bin>  Compiler launcher (e.g. sccache), passed to gn as
+                      cc_wrapper. Must be on PATH.
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --variant)   VARIANT="$2"; shift 2 ;;
-        --variant=*) VARIANT="${1#*=}"; shift ;;
-        --v8-dir)    V8_DIR="$2"; shift 2 ;;
-        --v8-dir=*)  V8_DIR="${1#*=}"; shift ;;
+        --variant)      VARIANT="$2"; shift 2 ;;
+        --variant=*)    VARIANT="${1#*=}"; shift ;;
+        --v8-dir)       V8_DIR="$2"; shift 2 ;;
+        --v8-dir=*)     V8_DIR="${1#*=}"; shift ;;
+        --cc-wrapper)   CC_WRAPPER="$2"; shift 2 ;;
+        --cc-wrapper=*) CC_WRAPPER="${1#*=}"; shift ;;
         --)          shift; NINJA_ARGS=("$@"); break ;;
         -h|--help)   usage; exit 0 ;;
         *)           echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -124,6 +130,10 @@ else
     GN_ARGS="$GN_ARGS
         v8_enable_lite_mode=true
         ios_deployment_target=\"$IOS_DEPLOYMENT_TARGET\""
+fi
+
+if [ -n "$CC_WRAPPER" ]; then
+    GN_ARGS="$GN_ARGS cc_wrapper=\"$CC_WRAPPER\""
 fi
 
 OUTFOLDER="out.gn/$VARIANT-release"
