@@ -82,6 +82,11 @@ checkpoint "Patching"
 # Both runtimes' object managers depend on resurrecting finalizers.
 git -C v8 apply "$ROOT_DIR/patches/v8_resurrecting_finalizers.patch"
 
+# Makes the per-isolate JS dispatch table reservation an embedder parameter.
+# iOS budgets virtual address space per process, and the 256MB default is
+# reserved once per isolate.
+git -C v8 apply "$ROOT_DIR/patches/v8_js_dispatch_table_reservation.patch"
+
 if [ "$PLATFORM" = "android" ]; then
     # API 21 and a selectable android_ndk_root are needed on every host; the
     # host-assert change in the same patch is a no-op on Linux.

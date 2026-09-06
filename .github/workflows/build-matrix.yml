@@ -310,8 +310,11 @@ jobs:
             echo "with itself across a static link."
             echo
             echo "Patches applied: \`v8_resurrecting_finalizers.patch\` (restores"
-            echo "\`WeakCallbackType::kFinalizer\`), \`android_build.patch\` (API 21 floor,"
-            echo "selectable \`android_ndk_root\`, macOS host support)."
+            echo "\`WeakCallbackType::kFinalizer\`), \`v8_js_dispatch_table_reservation.patch\`"
+            echo "(per-isolate JS dispatch table reservation via"
+            echo "\`Isolate::CreateParams::js_dispatch_table_reservation_size\`),"
+            echo "\`android_build.patch\` (API 21 floor, selectable \`android_ndk_root\`,"
+            echo "macOS host support)."
             echo
             echo "Verify with \`sha256sum -c SHA256SUMS\`. The gn args are in \`scripts/matrix/build-*.sh\`."
           } > notes.md
