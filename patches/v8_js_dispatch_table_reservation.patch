@@ -1,0 +1,234 @@
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 44bde532a62..f5d45dd9d1b 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -280,6 +280,12 @@ class V8_EXPORT IsolateGroup {
+   internal::IsolateGroup* isolate_group_;
+ };
+ 
++/**
++ * Indicates that Isolate::CreateParams::js_dispatch_table_reservation_size
++ * exists, so that embedders can compile against headers with and without it.
++ */
++#define V8_HAS_JS_DISPATCH_TABLE_RESERVATION_PARAM 1
++
+ /**
+  * Isolate represents an isolated instance of the V8 engine.  V8 isolates have
+  * completely separate states.  Objects from one isolate must not be used in
+@@ -368,6 +374,14 @@ class V8_EXPORT Isolate {
+      * CppHeap passed this way.
+      */
+     CppHeap* cpp_heap = nullptr;
++
++    /**
++     * Bytes of address space reserved for this isolate's JS dispatch table.
++     * 0 selects V8's default. Must be a multiple of the table segment size and
++     * at most the default; the table can hold reservation / 16 entries and an
++     * isolate that outgrows it aborts.
++     */
++    size_t js_dispatch_table_reservation_size = 0;
+   };
+ 
+   /**
+diff --git a/src/api/api.cc b/src/api/api.cc
+index fe4031b1c6a..cd501c4be51 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -10135,6 +10135,21 @@ void Isolate::Initialize(Isolate* v8_isolate,
+   i_isolate->set_api_external_references(params.external_references);
+   i_isolate->set_allow_atomics_wait(params.allow_atomics_wait);
+ 
++  if (params.js_dispatch_table_reservation_size != 0) {
++    Utils::ApiCheck(
++        params.js_dispatch_table_reservation_size %
++                    i::JSDispatchTable::kReservationSizeGranularity ==
++                0 &&
++            params.js_dispatch_table_reservation_size >=
++                i::JSDispatchTable::kMinReservationSize &&
++            params.js_dispatch_table_reservation_size <=
++                i::kJSDispatchTableReservationSize,
++        "v8::Isolate::New",
++        "js_dispatch_table_reservation_size is not a valid table size");
++    i_isolate->set_js_dispatch_table_reservation_size(
++        params.js_dispatch_table_reservation_size);
++  }
++
+   CppHeap* cpp_heap = params.cpp_heap;
+   if (!cpp_heap) {
+     cpp_heap =
+diff --git a/src/common/segmented-table-inl.h b/src/common/segmented-table-inl.h
+index 94a6d82e8e3..2b5c9eab94f 100644
+--- a/src/common/segmented-table-inl.h
++++ b/src/common/segmented-table-inl.h
+@@ -60,15 +60,17 @@ Address SegmentedTable<Entry, size>::base() const {
+ }
+ 
+ template <typename Entry, size_t size>
+-void SegmentedTable<Entry, size>::Initialize() {
++void SegmentedTable<Entry, size>::Initialize(size_t reservation_size) {
+   DCHECK(!is_initialized());
+   DCHECK_EQ(vas_, nullptr);
++  DCHECK_LE(reservation_size, kReservationSize);
++  DCHECK(IsAligned(reservation_size, kSegmentSize));
+ 
+   VirtualAddressSpace* root_space = GetPlatformVirtualAddressSpace();
+ 
+ #ifdef V8_TARGET_ARCH_64_BIT
+   static_assert(kUseContiguousMemory);
+-  DCHECK(IsAligned(kReservationSize, root_space->allocation_granularity()));
++  DCHECK(IsAligned(reservation_size, root_space->allocation_granularity()));
+ 
+   std::optional<VirtualAddressSpace::MemoryProtectionKeyId> pkey;
+   if (kUseContiguousMemory && kIsWriteProtected && ThreadIsolation::Enabled()) {
+@@ -81,7 +83,7 @@ void SegmentedTable<Entry, size>::Initialize() {
+ 
+   if (root_space->CanAllocateSubspaces()) {
+     auto subspace = root_space->AllocateSubspace(
+-        VirtualAddressSpace::kNoHint, kReservationSize, kAlignment,
++        VirtualAddressSpace::kNoHint, reservation_size, kAlignment,
+         PagePermissions::kReadWrite, pkey);
+     vas_ = subspace.release();
+   } else {
+@@ -90,11 +92,11 @@ void SegmentedTable<Entry, size>::Initialize() {
+     // use a fully-backed emulated subspace.
+     DCHECK(!pkey);
+     Address reservation_base = root_space->AllocatePages(
+-        VirtualAddressSpace::kNoHint, kReservationSize, kAlignment,
++        VirtualAddressSpace::kNoHint, reservation_size, kAlignment,
+         PagePermissions::kNoAccess);
+     if (reservation_base) {
+       vas_ = new base::EmulatedVirtualAddressSubspace(
+-          root_space, reservation_base, kReservationSize, kReservationSize);
++          root_space, reservation_base, reservation_size, reservation_size);
+     }
+   }
+   if (!vas_) {
+diff --git a/src/common/segmented-table.h b/src/common/segmented-table.h
+index 924398eb5bf..97ac054ff9e 100644
+--- a/src/common/segmented-table.h
++++ b/src/common/segmented-table.h
+@@ -36,10 +36,14 @@ class V8_EXPORT_PRIVATE SegmentedTable {
+   static constexpr bool kIsWriteProtected = Entry::IsWriteProtected;
+   static constexpr int kEntrySize = sizeof(Entry);
+ 
++  // The largest reservation this table supports. Handle encodings are derived
++  // from it, so it is fixed at compile time; the reservation actually taken is
++  // chosen in Initialize() and may be smaller.
++  static constexpr size_t kReservationSize = size;
++
+ #ifdef V8_TARGET_ARCH_64_BIT
+   // On 64 bit, we use a large address space reservation for the table memory.
+   static constexpr bool kUseContiguousMemory = true;
+-  static constexpr size_t kReservationSize = size;
+   static constexpr size_t kMaxCapacity = kReservationSize / kEntrySize;
+ #if defined(V8_TARGET_OS_WIN)
+   // On windows the allocation granularity is 64KB and thus we cannot make a
+@@ -231,7 +235,11 @@ class V8_EXPORT_PRIVATE SegmentedTable {
+ 
+   // Initializes the table by reserving the backing memory, allocating an
+   // initial segment, and populating the freelist.
+-  void Initialize();
++  //
++  // {reservation_size} must be a multiple of kSegmentSize and at most
++  // kReservationSize. It is not retained: sizeof(SegmentedTable) is pinned by
++  // the IsolateData layout guarantees in include/v8-internal.h.
++  void Initialize(size_t reservation_size = kReservationSize);
+ 
+   // Deallocates all memory associated with this table.
+   void TearDown();
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 56162048059..e6b959d2ca9 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -6252,7 +6252,7 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+   }
+ #endif  // V8_EXTERNAL_CODE_SPACE
+ 
+-  js_dispatch_table().Initialize();
++  js_dispatch_table().Initialize(js_dispatch_table_reservation_size_);
+ 
+   isolate_data_.external_reference_table()->Init(this);
+ 
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index d0131fa4e09..7f69cb7d71e 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -2326,6 +2326,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+     return isolate_data_.js_dispatch_table_.base_address();
+   }
+ 
++  // Must be set before Init(), which is where the table is reserved.
++  void set_js_dispatch_table_reservation_size(size_t size) {
++    js_dispatch_table_reservation_size_ = size;
++  }
++
+   Address continuation_preserved_embedder_data_address() {
+     return reinterpret_cast<Address>(
+         &isolate_data_.continuation_preserved_embedder_data_);
+@@ -2864,6 +2869,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   std::shared_ptr<v8::ArrayBuffer::Allocator> array_buffer_allocator_shared_;
+   size_t array_buffer_max_size_ = 0;
+ 
++  size_t js_dispatch_table_reservation_size_ =
++      JSDispatchTable::kReservationSize;
++
+   std::shared_ptr<v8::TaskRunner> task_runner_;
+ 
+   FutexWaitListNode futex_wait_list_node_;
+diff --git a/src/sandbox/external-entity-table-inl.h b/src/sandbox/external-entity-table-inl.h
+index 53e3edbd6b8..ca34f4bfd73 100644
+--- a/src/sandbox/external-entity-table-inl.h
++++ b/src/sandbox/external-entity-table-inl.h
+@@ -46,8 +46,8 @@ bool ExternalEntityTable<Entry, size>::Space::Contains(uint32_t index) {
+ }
+ 
+ template <typename Entry, size_t size>
+-void ExternalEntityTable<Entry, size>::Initialize() {
+-  Base::Initialize();
++void ExternalEntityTable<Entry, size>::Initialize(size_t reservation_size) {
++  Base::Initialize(reservation_size);
+ 
+   if (!ExternalEntityTable::kUseContiguousMemory) return;
+ 
+diff --git a/src/sandbox/external-entity-table.h b/src/sandbox/external-entity-table.h
+index 1c06bba63a6..e5cdc1c82bc 100644
+--- a/src/sandbox/external-entity-table.h
++++ b/src/sandbox/external-entity-table.h
+@@ -62,6 +62,7 @@ class V8_EXPORT_PRIVATE ExternalEntityTable
+   static constexpr size_t kEntriesPerSegment = Base::kEntriesPerSegment;
+   static constexpr size_t kEntrySize = Base::kEntrySize;
+   static constexpr size_t kNumReadOnlySegments = Base::kNumReadOnlySegments;
++  static constexpr size_t kReservationSize = Base::kReservationSize;
+ 
+   // A collection of segments in an external entity table.
+   //
+@@ -237,7 +238,10 @@ class V8_EXPORT_PRIVATE ExternalEntityTable
+ 
+   // Initializes the table by reserving the backing memory, allocating an
+   // initial segment, and populating the freelist.
+-  void Initialize();
++  //
++  // {reservation_size} must be a multiple of kSegmentSize, and large enough to
++  // hold the read-only segments plus at least one allocatable segment.
++  void Initialize(size_t reservation_size = kReservationSize);
+ 
+   // Deallocates all memory associated with this table.
+   void TearDown();
+diff --git a/src/sandbox/js-dispatch-table.h b/src/sandbox/js-dispatch-table.h
+index ea8e7ccf82b..1b8f8e5bd8a 100644
+--- a/src/sandbox/js-dispatch-table.h
++++ b/src/sandbox/js-dispatch-table.h
+@@ -188,6 +188,13 @@ class V8_EXPORT_PRIVATE JSDispatchTable
+ #endif  // V8_ENABLE_SANDBOX
+   static_assert(!kSupportsCompaction);
+ 
++  // Bounds for an embedder-chosen reservation. The read-only segments sit at
++  // the start of the table, so a usable reservation must cover them plus at
++  // least one allocatable segment.
++  static constexpr size_t kReservationSizeGranularity = kSegmentSize;
++  static constexpr size_t kMinReservationSize =
++      kSegmentSize * (kNumReadOnlySegments + 1);
++
+   JSDispatchTable() = default;
+   JSDispatchTable(const JSDispatchTable&) = delete;
+   JSDispatchTable& operator=(const JSDispatchTable&) = delete;
