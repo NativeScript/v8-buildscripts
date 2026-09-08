@@ -40,7 +40,7 @@ from a pinned revision, with the gn args under review, is the point of this repo
 | Platform | Targets | Runner |
 |---|---|---|
 | Android | `arm64-v8a`, `x86_64`, `armeabi-v7a`, `x86` | `ubuntu-24.04` |
-| Apple | `arm64-device`, `arm64-simulator`, `x64-simulator`, `arm64-catalyst`, `x64-catalyst` | `macos-15` |
+| Apple | `arm64-device`, `arm64-simulator`, `x64-simulator`, `arm64-catalyst`, `x64-catalyst`, `arm64-tvdevice`, `arm64-tvsimulator` | `macos-15` |
 
 Each target is its own job with its own checkout. That costs one `gclient sync`
 per job, but the sync is about 6 minutes against 90–145 minutes of compile, so
@@ -173,3 +173,16 @@ most of the reason this repo exists.
 Forked from [Kudo/v8-android-buildscripts](https://github.com/Kudo/v8-android-buildscripts)
 by Kudo Chien, which the original Android build pipeline came from. See
 [LICENSE](LICENSE).
+
+### tvOS source builds
+
+Use `scripts/matrix/build-ios.sh --variant arm64-tvdevice` and
+`--variant arm64-tvsimulator` after the normal iOS source fetch. These use
+the Apple TV SDK and tvOS target triples, with the same deployment minimum
+as iOS. They remain release, jitless builds without WebAssembly. Chromium
+requires `use_blink=true` for its tvOS toolchain; DrumBrake is explicitly
+disabled so that this does not enable an incomplete Wasm configuration.
+The existing iOS and Catalyst arguments are unchanged.
+
+Run `python3 tests/apple-args.py` on macOS to check the emitted GN arguments
+for all seven Apple variants without compiling V8.

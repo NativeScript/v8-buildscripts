@@ -29,6 +29,7 @@ Usage: $(basename "$0") --variant <variant> [--v8-dir <path>]
 
   --variant           arm64-device | arm64-simulator | x64-simulator
                       | arm64-catalyst | x64-catalyst
+                      | arm64-tvdevice | arm64-tvsimulator
   --cc-wrapper <bin>  Compiler launcher (e.g. sccache), passed to gn as
                       cc_wrapper. Must be on PATH.
 EOF
@@ -54,6 +55,8 @@ case "$VARIANT" in
     x64-simulator)   CPU=x64;   TARGET_ENV=simulator ;;
     arm64-catalyst)  CPU=arm64; TARGET_ENV=catalyst  ;;
     x64-catalyst)    CPU=x64;   TARGET_ENV=catalyst  ;;
+    arm64-tvdevice) CPU=arm64; TARGET_ENV=device ;;
+    arm64-tvsimulator) CPU=arm64; TARGET_ENV=simulator ;;
     *) echo "Invalid --variant '$VARIANT'" >&2; usage >&2; exit 1 ;;
 esac
 
@@ -130,6 +133,13 @@ else
     GN_ARGS="$GN_ARGS
         v8_enable_lite_mode=true
         ios_deployment_target=\"$IOS_DEPLOYMENT_TARGET\""
+fi
+
+# Chromium requires Blink configuration for tvOS even for standalone V8.
+# Disable DrumBrake explicitly: tvOS otherwise enables it independently of
+# v8_enable_webassembly, producing references to omitted Wasm types.
+if [[ "$VARIANT" = arm64-tv* ]]; then
+    GN_ARGS="$GN_ARGS target_platform=\"tvos\" use_blink=true v8_enable_drumbrake=false"
 fi
 
 if [ -n "$CC_WRAPPER" ]; then

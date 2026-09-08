@@ -18,6 +18,7 @@ on:
       - 'config.env'
       - 'patches/**'
       - 'scripts/matrix/**'
+      - 'tests/apple-args.py'
       - '.github/workflows/build-matrix.yml'
 
 permissions:
@@ -199,7 +200,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [arm64-device, arm64-simulator, x64-simulator, arm64-catalyst, x64-catalyst]
+        variant: [arm64-device, arm64-simulator, x64-simulator, arm64-catalyst, x64-catalyst, arm64-tvdevice, arm64-tvsimulator]
     # See the android job for the R2 bucket layout and the missing-secrets
     # fallback; this job mirrors it.
     env:
@@ -216,6 +217,9 @@ jobs:
       SCCACHE_S3_KEY_PREFIX: sccache
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check Apple build arguments
+        run: python3 tests/apple-args.py
 
       - name: Check R2 for a prebuilt artifact
         id: cache
