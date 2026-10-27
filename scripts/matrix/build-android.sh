@@ -68,9 +68,16 @@ if [ "$(uname)" != "Linux" ] && { [ "$CPU" = "arm" ] || [ "$CPU" = "x86" ]; }; t
     exit 1
 fi
 
-# Reproduces the shape of the 10.3 build these libraries replace: JIT and
-# WebAssembly on, i18n off. Every deviation from the gn defaults is deliberate:
+# Reproduces the shape of the 10.3 build these libraries replace (JIT and
+# WebAssembly on), except that i18n is now on. Every deviation from the gn
+# defaults is deliberate:
 #
+#   v8_enable_i18n_support / icu_use_data_file
+#       10.3 shipped with i18n off, which removes Intl, the locale-aware
+#       toLocale*String/localeCompare/case mapping, String#normalize and RegExp
+#       \p{...}. The ICU data (Chromium's android filter) is linked into the
+#       monolith rather than loaded from icudtl.dat, so V8::InitializeICU is a
+#       no-op and the runtime needs no data file to find.
 #   v8_array_buffer_internal_field_count / ..._view_...
 #       Defaulted to 2 in 10.3, default to 0 in 14.9. The Android runtime
 #       marshals an ArrayBuffer to a Java NIO buffer by linking its
@@ -113,7 +120,7 @@ GN_ARGS="
     v8_static_library=true
     v8_use_external_startup_data=false
 
-    v8_enable_i18n_support=false
+    v8_enable_i18n_support=true
     v8_enable_webassembly=true
     v8_enable_sandbox=false
     v8_enable_temporal_support=false

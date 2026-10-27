@@ -35,5 +35,11 @@ class AppleArgs(unittest.TestCase):
             self.assertIn('is_debug=false', args)
             self.assertEqual('v8_enable_lite_mode=true' in args, 'catalyst' not in variant)
 
+    def test_every_variant_embeds_icu(self):
+        for variant in ['arm64-device', 'arm64-simulator', 'x64-simulator', 'arm64-catalyst', 'x64-catalyst', 'arm64-tvdevice', 'arm64-tvsimulator']:
+            args = self.args_for(variant)
+            self.assertIn('v8_enable_i18n_support=true', args)
+            self.assertIn('icu_use_data_file=false', args)
+
 if __name__ == '__main__':
     unittest.main()

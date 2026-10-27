@@ -98,6 +98,12 @@ MODULES=(
 # process by device RAM, so that reservation fails outright on smaller devices
 # -- four tries, then Oilpan's fatal OOM handler, before any JS runs. It crashed
 # on an iPad Air while an iPad Pro was fine.
+#
+# v8_enable_i18n_support=true with icu_use_data_file=false links the ICU data
+# into the icudata object, which libv8_third_party picks up with the rest of
+# ICU, so V8::InitializeICU is a no-op and the runtime needs no icudtl.dat.
+# iOS and Catalyst get Chromium's ios data filter; tvOS gets the common one,
+# because the ICU build only selects the ios filter when use_blink is false.
 GN_ARGS="
     target_os=\"ios\"
     treat_warnings_as_errors=false
@@ -113,7 +119,7 @@ GN_ARGS="
     v8_use_external_startup_data=false
     v8_enable_sandbox=false
     v8_enable_debugging_features=false
-    v8_enable_i18n_support=false
+    v8_enable_i18n_support=true
     v8_enable_temporal_support=false
     v8_enable_pointer_compression=false
     v8_enable_v8_checks=false
@@ -201,10 +207,10 @@ archive_lib "libcrdtp_platform" "$OUTFOLDER/obj/third_party/inspector_protocol/c
 archive_lib "libinspector" "$OUTFOLDER/obj/src/inspector/inspector/*.o"
 archive_lib "libinspector_string_conversions" "$OUTFOLDER/obj/src/inspector/inspector_string_conversions/*.o"
 
-# abseil, simdutf and highway plus the libm trig sources: referenced by v8_base
-# but part of no module above. zlib and inspector_protocol are excluded because
-# they ship as libzip/libcrdtp; rust is excluded because disabling Temporal
-# leaves only stale objects behind.
+# ICU (code and data), abseil, simdutf and highway plus the libm trig sources:
+# referenced by v8_base but part of no module above. zlib and inspector_protocol
+# are excluded because they ship as libzip/libcrdtp; rust is excluded because
+# disabling Temporal leaves only stale objects behind.
 THIRD_PARTY_OBJS=$(find "$OUTFOLDER/obj/third_party" -name "*.o" \
     ! -path "*/zlib/*" ! -path "*/inspector_protocol/*" ! -path "*/rust/*" 2>/dev/null)
 archive_lib "libv8_third_party" "$THIRD_PARTY_OBJS $OUTFOLDER/obj/libm/*.o"
