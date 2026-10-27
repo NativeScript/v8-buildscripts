@@ -133,7 +133,14 @@ platform), dispatch the workflow with `platforms: android` or `platforms: ios`.
 ## The gn args are load-bearing
 
 They are commented at their definition in `scripts/matrix/build-android.sh` and
-`scripts/matrix/build-ios.sh`. Three worth knowing:
+`scripts/matrix/build-ios.sh`. Four worth knowing:
+
+- `v8_enable_i18n_support=true` with `icu_use_data_file=false` — the 10.3
+  builds had i18n off, so `Intl` did not exist and `localeCompare`,
+  `toLocale*String`, `String#normalize` and RegExp `\p{…}` were missing or
+  locale-blind. The ICU data is linked into the libraries (Chromium's `android`
+  filter on Android, `ios` on iOS and Catalyst, `common` on tvOS), so
+  `V8::InitializeICU` is a no-op and the runtimes need no `icudtl.dat`.
 
 - `cppgc_enable_caged_heap=false` (iOS only) — it defaults to **true on arm64**
   and, contrary to how the flags read, does *not* track
