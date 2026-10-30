@@ -87,6 +87,12 @@ git -C v8 apply "$ROOT_DIR/patches/v8_resurrecting_finalizers.patch"
 # reserved once per isolate.
 git -C v8 apply "$ROOT_DIR/patches/v8_js_dispatch_table_reservation.patch"
 
+if [ "$PLATFORM" = "ios" ]; then
+    # Mac Catalyst compiles as iOS but runs on macOS; this gives its JIT build
+    # the macOS MAP_JIT + pthread_jit_write_protect_np handling.
+    git -C v8 apply "$ROOT_DIR/patches/v8_catalyst_jit_write_protect.patch"
+fi
+
 if [ "$PLATFORM" = "android" ]; then
     # API 21 and a selectable android_ndk_root are needed on every host; the
     # host-assert change in the same patch is a no-op on Linux.

@@ -129,11 +129,20 @@ platform), dispatch the workflow with `platforms: android` or `platforms: ios`.
 |---|---|
 | `v8_resurrecting_finalizers.patch` | Restores `WeakCallbackType::kFinalizer`, removed upstream immediately after 10.3.22. Both runtimes' object managers depend on resurrecting finalizers. It also lifts, for the finalizer drain only, the `DisallowJavascriptExecution` scope that `Heap::CollectGarbage` now holds across the whole collection: 14.9 turns entering JS from a GC callback into a `GRACEFUL_FATAL`, and the iOS runtime reaches JS whenever a released ObjC object's `-dealloc` hits a JS-backed override. |
 | `android_build.patch` | Lowers chromium's minimum SDK to 21 (that floor is for Java/dex tooling; this builds only the native target), makes `android_ndk_root` a gn arg, and widens the hard Linux-host assert so macOS can build the 64-bit ABIs. |
+| `v8_catalyst_jit_write_protect.patch` | Mac Catalyst compiles as iOS (`TARGET_OS_IPHONE`), so V8 picks its iOS JIT-memory model, which assumes `MAP_JIT` pages are writable and executable at once. A Catalyst process runs on macOS, where Apple silicon makes `MAP_JIT` pages per-thread W^X, so the first JIT code write faults (`SIGBUS`). The patch gives Catalyst the macOS model: `pthread_jit_write_protect_np` around code writes (resolved with `dlsym`, since the SDK marks it unavailable on Catalyst) and the macOS code-range pre-commit. Applied to iOS fetches only; it is a no-op outside Catalyst. |
 
 ## The gn args are load-bearing
 
 They are commented at their definition in `scripts/matrix/build-android.sh` and
-`scripts/matrix/build-ios.sh`. Three worth knowing:
+`scripts/matrix/build-ios.sh`. Four worth knowing:
+
+- `v8_enable_lite_mode=false` (Catalyst only) — `gni/v8.gni` turns lite mode
+  on for every `target_platform="iphoneos"` build, and Catalyst is only a
+  `target_environment` of that platform, so without the explicit override the
+  Catalyst archives ship without Sparkplug, Maglev or TurboFan. Catalyst keeps
+  the full tier set so apps entitled to JIT (`com.apple.security.cs.allow-jit`)
+  get it; the iOS runtime passes `--jitless` when the process cannot map JIT
+  memory. This adds about 9.6 MB to the stripped arm64 Catalyst framework.
 
 - `cppgc_enable_caged_heap=false` (iOS only) — it defaults to **true on arm64**
   and, contrary to how the flags read, does *not* track
