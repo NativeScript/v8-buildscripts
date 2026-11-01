@@ -77,8 +77,13 @@ MODULES=(
 )
 
 # iOS proper cannot JIT, so it is built in lite mode. Catalyst runs on macOS,
-# where JIT is permitted, and is deliberately not lite -- keeping the two arg
-# sets distinct preserves what each currently ships.
+# where an app holding com.apple.security.cs.allow-jit may JIT, so it ships the
+# full tier set (Sparkplug, Maglev, TurboFan) and the runtime passes --jitless
+# when the process may not map JIT memory. lite mode must be turned off
+# explicitly: gni/v8.gni defaults it on for target_platform "iphoneos", and
+# Catalyst is only a target_environment of that platform. The Catalyst JIT also
+# needs patches/v8_catalyst_jit_write_protect.patch; without it V8 writes JIT
+# code without macOS's per-thread W^X toggle and faults on Apple silicon.
 #
 # v8_expose_public_symbols marks the V8_EXPORT API default-visibility. Plugins
 # (e.g. @nativescript/canvas) compile against the vendored V8 headers and
@@ -128,6 +133,7 @@ if [ "$TARGET_ENV" = "catalyst" ]; then
     GN_ARGS="$GN_ARGS
         is_official_build=true
         use_thin_lto=false
+        v8_enable_lite_mode=false
         ios_deployment_target=\"$CATALYST_DEPLOYMENT_TARGET\""
 else
     GN_ARGS="$GN_ARGS

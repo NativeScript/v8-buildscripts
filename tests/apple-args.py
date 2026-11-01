@@ -35,5 +35,9 @@ class AppleArgs(unittest.TestCase):
             self.assertIn('is_debug=false', args)
             self.assertEqual('v8_enable_lite_mode=true' in args, 'catalyst' not in variant)
 
+    def test_catalyst_is_built_with_the_jit(self):
+        for variant in ['arm64-catalyst', 'x64-catalyst']:
+            self.assertIn('v8_enable_lite_mode=false', self.args_for(variant))
+
 if __name__ == '__main__':
     unittest.main()

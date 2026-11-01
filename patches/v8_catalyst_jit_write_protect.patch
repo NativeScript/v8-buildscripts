@@ -1,0 +1,89 @@
+diff --git a/src/base/build_config.h b/src/base/build_config.h
+index ee745539dfd..4182c592472 100644
+--- a/src/base/build_config.h
++++ b/src/base/build_config.h
+@@ -36,8 +36,16 @@
+ #endif
+ #define V8_HAS_PKU_JIT_WRITE_PROTECT V8_HAS_PKU_SUPPORT
+ 
++// Mac Catalyst compiles as iOS (TARGET_OS_IPHONE) but runs on macOS, so its
++// JIT pages follow the macOS MAP_JIT + pthread_jit_write_protect_np rules.
++#if defined(V8_OS_IOS) && defined(TARGET_OS_MACCATALYST) && \
++    TARGET_OS_MACCATALYST
++#define V8_OS_MACCATALYST 1
++#endif
++
+ // pthread_jit_write_protect is only available on arm64 Mac.
+-#if defined(V8_HOST_ARCH_ARM64) && defined(V8_OS_MACOS)
++#if defined(V8_HOST_ARCH_ARM64) && \
++    (defined(V8_OS_MACOS) || defined(V8_OS_MACCATALYST))
+ #define V8_HAS_PTHREAD_JIT_WRITE_PROTECT 1
+ #else
+ #define V8_HAS_PTHREAD_JIT_WRITE_PROTECT 0
+diff --git a/src/base/platform/platform-darwin.cc b/src/base/platform/platform-darwin.cc
+index 41fc5ec3302..004ae7c002b 100644
+--- a/src/base/platform/platform-darwin.cc
++++ b/src/base/platform/platform-darwin.cc
+@@ -234,6 +234,24 @@ V8_BASE_EXPORT void SetJitWriteProtected(int enable) {
+ }
+ 
+ #pragma clang diagnostic pop
++#elif V8_HAS_PTHREAD_JIT_WRITE_PROTECT && defined(V8_OS_MACCATALYST)
++// The SDK marks pthread_jit_write_protect_np unavailable on Mac Catalyst, but
++// a Catalyst process runs against macOS's libpthread, which exports it.
++namespace {
++using JitWriteProtectFn = void (*)(int);
++
++JitWriteProtectFn ResolveJitWriteProtect() {
++  auto fn = reinterpret_cast<JitWriteProtectFn>(
++      dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
++  CHECK_NOT_NULL(fn);
++  return fn;
++}
++}  // namespace
++
++V8_BASE_EXPORT void SetJitWriteProtected(int enable) {
++  static const JitWriteProtectFn jit_write_protect = ResolveJitWriteProtect();
++  jit_write_protect(enable);
++}
+ #endif
+ 
+ }  // namespace base
+diff --git a/src/heap/code-range.cc b/src/heap/code-range.cc
+index ca0b1742b38..b979862d76f 100644
+--- a/src/heap/code-range.cc
++++ b/src/heap/code-range.cc
+@@ -382,8 +382,8 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
+ // Don't pre-commit the code cage on Windows since it uses memory and it's not
+ // required for recommit.
+ // iOS cannot adjust page permissions for MAP_JIT'd pages, they are set as RWX
+-// at the start.
+-#if !defined(V8_OS_WIN) && !defined(V8_OS_IOS)
++// at the start. Mac Catalyst runs on macOS and needs the pre-commit.
++#if !defined(V8_OS_WIN) && (!defined(V8_OS_IOS) || defined(V8_OS_MACCATALYST))
+   if (params.page_initialization_mode ==
+       base::PageInitializationMode::kRecommitOnly) {
+     void* base = reinterpret_cast<void*>(page_allocator_->begin() +
+@@ -605,7 +605,7 @@ uint8_t* CodeRange::RemapEmbeddedBuiltins(Isolate* isolate,
+   if (V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT ||
+       V8_HEAP_USE_BECORE_JIT_WRITE_PROTECT || ThreadIsolation::Enabled()) {
+     // iOS code pages are already RWX and don't need to be modified.
+-#if !defined(V8_TARGET_OS_IOS)
++#if !defined(V8_TARGET_OS_IOS) || defined(V8_OS_MACCATALYST)
+     if (!page_allocator()->RecommitPages(embedded_blob_code_copy, code_size,
+                                          PageAllocator::kReadWriteExecute)) {
+       V8::FatalProcessOutOfMemory(isolate,
+diff --git a/src/heap/code-range.h b/src/heap/code-range.h
+index b42081b8aa1..acb2f57d420 100644
+--- a/src/heap/code-range.h
++++ b/src/heap/code-range.h
+@@ -177,7 +177,8 @@ class CodeRange final : public VirtualMemoryCage {
+   // Red zones that we should not allocate in.
+   RedZones red_zones_;
+ 
+-#if !defined(V8_OS_WIN) && !defined(V8_OS_IOS) && defined(DEBUG)
++#if !defined(V8_OS_WIN) && \
++    (!defined(V8_OS_IOS) || defined(V8_OS_MACCATALYST)) && defined(DEBUG)
+   bool immutable_ = false;
+ #endif
+ };
