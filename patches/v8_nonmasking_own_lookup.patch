@@ -1,0 +1,37 @@
+diff --git a/src/objects/lookup.cc b/src/objects/lookup.cc
+index 7b8afd6872d..cd4f600f572 100644
+--- a/src/objects/lookup.cc
++++ b/src/objects/lookup.cc
+@@ -128,21 +128,18 @@ void LookupIterator::NextInternal(Tagged<Map> orig_map,
+         IsFound()) {
+       // In theory we also need to check JSPROXY but since the iterator doesn't
+       // know which question to ask, we assume the lookup succeeds.
+-      switch (state_) {
+-        // https://webidl.spec.whatwg.org/#dfn-named-property-visibility says a
+-        // second interceptor on the prototype chain is invisible.
+-        case INTERCEPTOR:
+-          continue;
+-        case ACCESS_CHECK: {
+-          // If an access check fails, we assume the lookup succeeds.
+-          if (HasAccess()) {
+-            continue;
+-          }
+-          break;
+-        }
+-        default:
+-          break;
++      //
++      // https://webidl.spec.whatwg.org/#dfn-named-property-visibility says a
++      // second named interceptor on the prototype chain is invisible, and a
++      // passed access check is too. The holder's real properties are still
++      // visible, so step past them within this holder instead of leaving it:
++      // `continue` here would re-test the loop condition while the state is
++      // still a found one and end the walk on this holder.
++      while ((state_ == INTERCEPTOR && !is_element) ||
++             (state_ == ACCESS_CHECK && HasAccess())) {
++        state_ = LookupInSpecialHolder<is_element>(map, holder);
+       }
++      if (!IsFound()) continue;
+       // We need fully reset state, since this is not a true hit.
+       number_ = InternalIndex::NotFound();
+       property_details_ = PropertyDetails::Empty();

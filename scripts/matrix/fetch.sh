@@ -87,6 +87,10 @@ git -C v8 apply "$ROOT_DIR/patches/v8_resurrecting_finalizers.patch"
 # reserved once per isolate.
 git -C v8 apply "$ROOT_DIR/patches/v8_js_dispatch_table_reservation.patch"
 
+# Own-property lookups through a kNonMasking named interceptor ended on a
+# prototype that has a named interceptor of its own (crbug 585053531).
+git -C v8 apply "$ROOT_DIR/patches/v8_nonmasking_own_lookup.patch"
+
 if [ "$PLATFORM" = "ios" ]; then
     # Mac Catalyst compiles as iOS but runs on macOS; this gives its JIT build
     # the macOS MAP_JIT + pthread_jit_write_protect_np handling.
