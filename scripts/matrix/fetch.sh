@@ -91,6 +91,12 @@ git -C v8 apply "$ROOT_DIR/patches/v8_js_dispatch_table_reservation.patch"
 # prototype that has a named interceptor of its own (crbug 585053531).
 git -C v8 apply "$ROOT_DIR/patches/v8_nonmasking_own_lookup.patch"
 
+# CreateDataProperty (class fields, v8::Object::CreateDataProperty) added the
+# property behind a named interceptor's back, and the definer it did reach got
+# the field's attributes inverted.
+git -C v8 apply "$ROOT_DIR/patches/v8_create_data_property_interceptor.patch"
+git -C v8 apply "$ROOT_DIR/patches/v8_interceptor_define_descriptor.patch"
+
 if [ "$PLATFORM" = "ios" ]; then
     # Mac Catalyst compiles as iOS but runs on macOS; this gives its JIT build
     # the macOS MAP_JIT + pthread_jit_write_protect_np handling.

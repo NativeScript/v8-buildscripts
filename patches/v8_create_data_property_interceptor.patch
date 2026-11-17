@@ -1,0 +1,34 @@
+diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
+index d05eb55..f17be0a 100644
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -4264,7 +4264,11 @@ Maybe<bool> JSObject::CreateDataProperty(Isolate* isolate,
+                                          PropertyKey key,
+                                          DirectHandle<Object> value,
+                                          Maybe<ShouldThrow> should_throw) {
+-  if (!key.is_element()) {
++  // A named interceptor must see the definition: the fast path follows a map
++  // transition without looking at it.
++  bool named_interceptor =
++      !key.is_element() && object->map()->has_named_interceptor();
++  if (!key.is_element() && !named_interceptor) {
+     if (TryFastAddDataProperty(isolate, object, key.name(), value, NONE)) {
+       return Just(true);
+     }
+@@ -4277,6 +4281,16 @@ Maybe<bool> JSObject::CreateDataProperty(Isolate* isolate,
+     return can_define;
+   }
+ 
++  if (named_interceptor) {
++    // The check above advanced the iterator past the interceptor. Define
++    // through it, as [[DefineOwnProperty]] would, rather than adding the
++    // property behind its back.
++    it.Restart();
++    return DefineOwnPropertyIgnoreAttributes(&it, value, NONE, should_throw,
++                                             DONT_FORCE_FIELD,
++                                             EnforceDefineSemantics::kDefine);
++  }
++
+   RETURN_ON_EXCEPTION_VALUE(isolate,
+                             DefineOwnPropertyIgnoreAttributes(&it, value, NONE),
+                             Nothing<bool>());
