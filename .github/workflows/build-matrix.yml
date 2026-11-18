@@ -8,7 +8,7 @@ on:
       platforms:
         description: Which platforms to build
         type: choice
-        options: [all, android, ios]
+        options: [all, android, ios, macos]
         default: all
   push:
     branches: [main]
@@ -40,9 +40,12 @@ jobs:
       v8_version: ${{ steps.cfg.outputs.v8_version }}
       ndk_release: ${{ steps.cfg.outputs.ndk_release }}
       inputs_hash: ${{ steps.cfg.outputs.inputs_hash }}
+      apple_variants: ${{ steps.cfg.outputs.apple_variants }}
     steps:
       - uses: actions/checkout@v7
       - id: cfg
+        env:
+          PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
         run: |
           set -a; . ./config.env; set +a
           echo "v8_version=$V8_VERSION"      >> "$GITHUB_OUTPUT"
@@ -52,6 +55,17 @@ jobs:
           # finished build in R2 can be reused instead of repeated.
           echo "inputs_hash=$(git ls-files -s config.env patches scripts/matrix .github/workflows/build-matrix.yml \
             | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
+          # iOS and macOS variants run in the same job definition but are
+          # dispatched separately, so the matrix is chosen here.
+          ios='"arm64-device","arm64-simulator","x64-simulator","arm64-catalyst","x64-catalyst","arm64-tvdevice","arm64-tvsimulator"'
+          macos='"arm64-macos","x64-macos"'
+          case "$PLATFORMS" in
+            ios)     variants="[$ios]" ;;
+            macos)   variants="[$macos]" ;;
+            android) variants="[]" ;;
+            *)       variants="[$ios,$macos]" ;;
+          esac
+          echo "apple_variants=$variants" >> "$GITHUB_OUTPUT"
 
   android:
     needs: config
@@ -192,15 +206,15 @@ jobs:
           path: v8-*-src-headers.tar.gz
           retention-days: 7
 
-  ios:
+  apple:
     needs: config
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios' }}
+    if: ${{ needs.config.outputs.apple_variants != '[]' }}
     runs-on: macos-15
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        variant: [arm64-device, arm64-simulator, x64-simulator, arm64-catalyst, x64-catalyst, arm64-tvdevice, arm64-tvsimulator]
+        variant: ${{ fromJSON(needs.config.outputs.apple_variants) }}
     # See the android job for the R2 bucket layout and the missing-secrets
     # fallback; this job mirrors it.
     env:
@@ -221,11 +235,17 @@ jobs:
       - name: Check Apple build arguments
         run: python3 tests/apple-args.py
 
+      # The slice names dist/, the asset and the R2 key. It is resolved before
+      # the R2 check because a hit skips the build.
+      - name: Resolve the slice
+        id: slice
+        run: echo "slice=$(scripts/matrix/build-ios.sh --variant ${{ matrix.variant }} --print-slice)" >> "$GITHUB_OUTPUT"
+
       - name: Check R2 for a prebuilt artifact
         id: cache
         if: env.AWS_ACCESS_KEY_ID != ''
         run: |
-          key="artifacts/${{ needs.config.outputs.inputs_hash }}/v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz"
+          key="artifacts/${{ needs.config.outputs.inputs_hash }}/v8-${{ needs.config.outputs.v8_version }}-${{ steps.slice.outputs.slice }}.tar.gz"
           if aws s3api head-object --endpoint-url "$R2_ENDPOINT" \
               --bucket "$R2_BUCKET" --key "$key" >/dev/null 2>&1; then
             aws s3 cp --endpoint-url "$R2_ENDPOINT" "s3://$R2_BUCKET/$key" .
@@ -266,24 +286,24 @@ jobs:
       - name: Package
         if: steps.cache.outputs.hit != 'true'
         run: |
-          tar -czf "v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz" \
-            -C dist "ios-${{ matrix.variant }}"
+          tar -czf "v8-${{ needs.config.outputs.v8_version }}-${{ steps.slice.outputs.slice }}.tar.gz" \
+            -C dist "${{ steps.slice.outputs.slice }}"
 
       - name: Upload the artifact to R2
         if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
         run: |
-          f="v8-${{ needs.config.outputs.v8_version }}-ios-${{ matrix.variant }}.tar.gz"
+          f="v8-${{ needs.config.outputs.v8_version }}-${{ steps.slice.outputs.slice }}.tar.gz"
           aws s3 cp --endpoint-url "$R2_ENDPOINT" "$f" \
             "s3://$R2_BUCKET/artifacts/${{ needs.config.outputs.inputs_hash }}/$f"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: v8-ios-${{ matrix.variant }}
-          path: v8-*-ios-${{ matrix.variant }}.tar.gz
+          name: v8-${{ steps.slice.outputs.slice }}
+          path: v8-*-${{ steps.slice.outputs.slice }}.tar.gz
           retention-days: 7
 
   release:
-    needs: [config, android, ios]
+    needs: [config, android, apple]
     if: startsWith(github.ref, 'refs/tags/v8-')
     runs-on: ubuntu-24.04
     steps:

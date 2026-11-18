@@ -41,6 +41,7 @@ from a pinned revision, with the gn args under review, is the point of this repo
 |---|---|---|
 | Android | `arm64-v8a`, `x86_64`, `armeabi-v7a`, `x86` | `ubuntu-24.04` |
 | Apple | `arm64-device`, `arm64-simulator`, `x64-simulator`, `arm64-catalyst`, `x64-catalyst`, `arm64-tvdevice`, `arm64-tvsimulator` | `macos-15` |
+| macOS | `arm64-macos`, `x64-macos` | `macos-15` |
 
 Each target is its own job with its own checkout. That costs one `gclient sync`
 per job, but the sync is about 6 minutes against 90–145 minutes of compile, so
@@ -49,6 +50,17 @@ sharing it would save almost nothing.
 This replaces the previous arrangement of one branch per architecture. Nine
 branches meant nine places to apply a V8 bump or a patch, and cutting a release
 needs a single ref to tag.
+
+### macOS
+
+The macOS variants are built by the Apple job from the same iOS checkout, but
+they are `target_os="mac"` rather than an iOS `target_environment`, so they ship
+as `macos-<cpu>` (`v8-<version>-macos-arm64.tar.gz`) instead of
+`ios-<variant>`. Like Catalyst they keep the full tier set, and they share the
+rest of the Apple gn args, pointer compression and the cppgc cage off included:
+every Apple slice is compiled against the same `include/` and embedder defines.
+`MACOS_DEPLOYMENT_TARGET` follows the macOS runtime in
+[NativeScript/runtimes](https://github.com/NativeScript/runtimes).
 
 ### visionOS needs no build of its own
 
@@ -114,14 +126,16 @@ scripts/matrix/build-android.sh --abi arm64-v8a --ndk-root "$ANDROID_HOME/ndk/<v
 
 scripts/matrix/fetch.sh --platform ios
 scripts/matrix/build-ios.sh --variant arm64-device
+scripts/matrix/build-ios.sh --variant arm64-macos
 ```
 
-Sources land in `.v8/`, output in `dist/<platform>-<target>/`. The two platforms
+Sources land in `.v8/`, output in `dist/<slice>/` (`build-ios.sh --variant <v>
+--print-slice` prints it). The two platforms
 need different DEPS, so use separate `--v8-dir` checkouts to keep both without
 re-syncing.
 
-To iterate on one platform in CI without rebuilding the other (~2.5 hours per
-platform), dispatch the workflow with `platforms: android` or `platforms: ios`.
+To iterate on one platform in CI without rebuilding the others (~2.5 hours per
+platform), dispatch the workflow with `platforms: android`, `ios` or `macos`.
 
 ## Patches
 
@@ -197,4 +211,4 @@ disabled so that this does not enable an incomplete Wasm configuration.
 The existing iOS and Catalyst arguments are unchanged.
 
 Run `python3 tests/apple-args.py` on macOS to check the emitted GN arguments
-for all seven Apple variants without compiling V8.
+for all nine Apple variants without compiling V8.

@@ -1,12 +1,15 @@
 #!/bin/bash
 set -e
 #
-# Builds the V8 static libraries for one Apple variant into dist/ios-<variant>/.
+# Builds the V8 static libraries for one Apple variant into dist/<slice>/, where
+# the slice is ios-<variant>, or macos-<cpu> for the macOS variants. The slice
+# also names the release asset; --print-slice prints it without building.
 #
 # Usage: build-ios.sh --variant <variant> [--v8-dir <path>] [-- <ninja args>]
 #
 # Variants: arm64-device, arm64-simulator, x64-simulator,
-#           arm64-catalyst, x64-catalyst
+#           arm64-catalyst, x64-catalyst, arm64-tvdevice, arm64-tvsimulator,
+#           arm64-macos, x64-macos
 #
 # Unlike Android, V8 has no monolith target here -- the iOS runtime links a set
 # of per-module archives, so each is rebuilt from its objects. ninja emits thin
@@ -20,18 +23,22 @@ source "$ROOT_DIR/config.env"
 V8_DIR="$ROOT_DIR/.v8/v8"
 VARIANT=""
 CC_WRAPPER=""
+PRINT_SLICE=false
 NINJA_ARGS=()
 
 usage() {
     cat <<EOF
 Usage: $(basename "$0") --variant <variant> [--v8-dir <path>]
-                        [--cc-wrapper <bin>] [-- <ninja args>]
+                        [--cc-wrapper <bin>] [--print-slice] [-- <ninja args>]
 
   --variant           arm64-device | arm64-simulator | x64-simulator
                       | arm64-catalyst | x64-catalyst
                       | arm64-tvdevice | arm64-tvsimulator
+                      | arm64-macos | x64-macos
   --cc-wrapper <bin>  Compiler launcher (e.g. sccache), passed to gn as
                       cc_wrapper. Must be on PATH.
+  --print-slice       Print the variant's dist/ directory and release asset
+                      stem (e.g. ios-arm64-device, macos-arm64) and exit.
 EOF
 }
 
@@ -43,12 +50,15 @@ while [ $# -gt 0 ]; do
         --v8-dir=*)     V8_DIR="${1#*=}"; shift ;;
         --cc-wrapper)   CC_WRAPPER="$2"; shift 2 ;;
         --cc-wrapper=*) CC_WRAPPER="${1#*=}"; shift ;;
+        --print-slice)  PRINT_SLICE=true; shift ;;
         --)          shift; NINJA_ARGS=("$@"); break ;;
         -h|--help)   usage; exit 0 ;;
         *)           echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
     esac
 done
 
+# macOS is target_os="mac", which has no target_environment.
+TARGET_OS=ios
 case "$VARIANT" in
     arm64-device)    CPU=arm64; TARGET_ENV=device    ;;
     arm64-simulator) CPU=arm64; TARGET_ENV=simulator ;;
@@ -57,8 +67,21 @@ case "$VARIANT" in
     x64-catalyst)    CPU=x64;   TARGET_ENV=catalyst  ;;
     arm64-tvdevice) CPU=arm64; TARGET_ENV=device ;;
     arm64-tvsimulator) CPU=arm64; TARGET_ENV=simulator ;;
+    arm64-macos)     CPU=arm64; TARGET_ENV="";        TARGET_OS=mac ;;
+    x64-macos)       CPU=x64;   TARGET_ENV="";        TARGET_OS=mac ;;
     *) echo "Invalid --variant '$VARIANT'" >&2; usage >&2; exit 1 ;;
 esac
+
+if [ "$TARGET_OS" = "mac" ]; then
+    SLICE="macos-$CPU"
+else
+    SLICE="ios-$VARIANT"
+fi
+
+if [ "$PRINT_SLICE" = true ]; then
+    echo "$SLICE"
+    exit 0
+fi
 
 [ "$(uname)" = "Darwin" ] || { echo "Apple variants require a macOS host." >&2; exit 1; }
 
@@ -103,14 +126,17 @@ MODULES=(
 # process by device RAM, so that reservation fails outright on smaller devices
 # -- four tries, then Oilpan's fatal OOM handler, before any JS runs. It crashed
 # on an iPad Air while an iPad Pro was fine.
+#
+# macOS takes the same shared set: every Apple slice is compiled against one
+# include/ with one set of embedder defines (no V8_COMPRESS_POINTERS, no caged
+# heap), so a slice that differs here is an ABI mismatch, not a tuning choice.
 GN_ARGS="
-    target_os=\"ios\"
+    target_os=\"$TARGET_OS\"
     treat_warnings_as_errors=false
     icu_use_data_file=false
     use_custom_libcxx=false
     is_component_build=false
     is_debug=false
-    ios_enable_code_signing=false
     v8_control_flow_integrity=false
     v8_monolithic=false
     v8_static_library=true
@@ -127,18 +153,35 @@ GN_ARGS="
     symbol_level=0
 "
 
-if [ "$TARGET_ENV" = "catalyst" ]; then
+if [ "$TARGET_OS" = "mac" ]; then
+    # Full tier set, as for Catalyst. On desktop targets is_official_build also
+    # defaults chrome_pgo_phase to 2, which makes gn exec
+    # //tools/update_pgo_profiles.py -- a Chromium script absent from a
+    # standalone V8 checkout, so gn gen fails without the override.
+    GN_ARGS="$GN_ARGS
+        is_official_build=true
+        use_thin_lto=false
+        chrome_pgo_phase=0
+        v8_enable_lite_mode=false
+        mac_deployment_target=\"$MACOS_DEPLOYMENT_TARGET\""
+elif [ "$TARGET_ENV" = "catalyst" ]; then
     # is_official_build here implies ThinLTO, which emits bitcode rather than
     # object code and cannot be vendored, hence the explicit override.
     GN_ARGS="$GN_ARGS
         is_official_build=true
         use_thin_lto=false
         v8_enable_lite_mode=false
+        ios_enable_code_signing=false
         ios_deployment_target=\"$CATALYST_DEPLOYMENT_TARGET\""
 else
     GN_ARGS="$GN_ARGS
         v8_enable_lite_mode=true
+        ios_enable_code_signing=false
         ios_deployment_target=\"$IOS_DEPLOYMENT_TARGET\""
+fi
+
+if [ -n "$TARGET_ENV" ]; then
+    GN_ARGS="$GN_ARGS target_environment=\"$TARGET_ENV\""
 fi
 
 # Chromium requires Blink configuration for tvOS even for standalone V8.
@@ -153,7 +196,7 @@ if [ -n "$CC_WRAPPER" ]; then
 fi
 
 OUTFOLDER="out.gn/$VARIANT-release"
-DIST="$ROOT_DIR/dist/ios-$VARIANT"
+DIST="$ROOT_DIR/dist/$SLICE"
 
 cd "$V8_DIR"
 
@@ -181,7 +224,7 @@ archive_lib() {
 }
 
 rm -rf "$OUTFOLDER"
-gn gen "$OUTFOLDER" --args="$GN_ARGS target_environment=\"$TARGET_ENV\" target_cpu=\"$CPU\" v8_target_cpu=\"$CPU\""
+gn gen "$OUTFOLDER" --args="$GN_ARGS target_cpu=\"$CPU\" v8_target_cpu=\"$CPU\""
 
 echo "Building $VARIANT: $(date)"
 ninja "${NINJA_ARGS[@]}" -C "$OUTFOLDER" "${MODULES[@]}" inspector
