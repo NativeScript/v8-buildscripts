@@ -1,0 +1,71 @@
+diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
+index d05eb55..6f2f912 100644
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -3801,9 +3801,9 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
+         InterceptorResult result;
+         if (semantics == EnforceDefineSemantics::kDefine) {
+           PropertyDescriptor descriptor;
+-          descriptor.set_configurable((attributes & DONT_DELETE) != 0);
+-          descriptor.set_enumerable((attributes & DONT_ENUM) != 0);
+-          descriptor.set_writable((attributes & READ_ONLY) != 0);
++          descriptor.set_configurable((attributes & DONT_DELETE) == 0);
++          descriptor.set_enumerable((attributes & DONT_ENUM) == 0);
++          descriptor.set_writable((attributes & READ_ONLY) == 0);
+           descriptor.set_value(Cast<JSAny>(value));
+           if (!DefinePropertyWithInterceptorInternal(it, it->GetInterceptor(),
+                                                      should_throw, &descriptor)
+diff --git a/test/cctest/test-api-interceptors.cc b/test/cctest/test-api-interceptors.cc
+index a62476a..b75e8da 100644
+--- a/test/cctest/test-api-interceptors.cc
++++ b/test/cctest/test-api-interceptors.cc
+@@ -2748,6 +2748,49 @@ THREADED_TEST(PropertyDefinerCallbackWithSetter) {
+                    .FromJust());
+ }
+ 
++// Check that a class field reaches the callback as a plain data property.
++namespace {
++int data_property_define_calls = 0;
++v8::Intercepted CheckDataPropertyDefineCallback(
++    Local<Name> name, const v8::PropertyDescriptor& desc,
++    const v8::PropertyCallbackInfo<Boolean>& info) {
++  data_property_define_calls++;
++  CHECK(desc.has_value());
++  CHECK_EQ(42, desc.value()
++                   ->Int32Value(info.GetIsolate()->GetCurrentContext())
++                   .FromJust());
++  CHECK(desc.has_writable());
++  CHECK(desc.writable());
++  CHECK(desc.has_enumerable());
++  CHECK(desc.enumerable());
++  CHECK(desc.has_configurable());
++  CHECK(desc.configurable());
++  CHECK(!desc.has_get());
++  CHECK(!desc.has_set());
++  return v8::Intercepted::kYes;
++}
++}  // namespace
++
++THREADED_TEST(PropertyDefinerCallbackClassField) {
++  v8::HandleScope scope(CcTest::isolate());
++  LocalContext env;
++  v8::Local<v8::FunctionTemplate> templ =
++      v8::FunctionTemplate::New(CcTest::isolate());
++  templ->InstanceTemplate()->SetHandler(v8::NamedPropertyHandlerConfiguration(
++      nullptr, nullptr, nullptr, nullptr, nullptr,
++      CheckDataPropertyDefineCallback));
++  env->Global()
++      ->Set(env.local(), v8_str("Cls"),
++            templ->GetFunction(env.local()).ToLocalChecked())
++      .FromJust();
++  data_property_define_calls = 0;
++  const char* code =
++      "class WithField extends Cls { x = 42; }"
++      "new WithField().x;";
++  CHECK(v8_compile(code)->Run(env.local()).ToLocalChecked()->IsUndefined());
++  CHECK_EQ(1, data_property_define_calls);
++}
++
+ namespace {
+ std::vector<std::string> definer_calls;
+ v8::Intercepted LogDefinerCallsAndContinueCallback(

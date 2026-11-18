@@ -1,0 +1,155 @@
+diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
+index d05eb55..e575536 100644
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -4263,9 +4263,25 @@ Maybe<bool> JSObject::CreateDataProperty(Isolate* isolate,
+                                          DirectHandle<JSObject> object,
+                                          PropertyKey key,
+                                          DirectHandle<Object> value,
+-                                         Maybe<ShouldThrow> should_throw) {
++                                         Maybe<ShouldThrow> should_throw,
++                                         EnforceDefineSemantics semantics) {
+   if (!key.is_element()) {
+-    if (TryFastAddDataProperty(isolate, object, key.name(), value, NONE)) {
++    if (semantics == EnforceDefineSemantics::kDefine &&
++        object->map()->has_named_interceptor()) {
++      // Neither the transition fast path nor the checks below call the
++      // interceptor. As in [[DefineOwnProperty]], its definer goes first, and
++      // the checks run only if it declines.
++      LookupIterator it(isolate, object, key, LookupIterator::OWN);
++      while (it.state() == LookupIterator::ACCESS_CHECK && it.HasAccess()) {
++        it.Next();
++      }
++      if (it.state() == LookupIterator::INTERCEPTOR) {
++        return DefineOwnPropertyIgnoreAttributes(
++            &it, value, NONE, should_throw, DONT_FORCE_FIELD,
++            EnforceDefineSemantics::kDefine);
++      }
++    } else if (TryFastAddDataProperty(isolate, object, key.name(), value,
++                                      NONE)) {
+       return Just(true);
+     }
+   }
+diff --git a/src/objects/js-objects.h b/src/objects/js-objects.h
+index 0efd658..5d70c7b 100644
+--- a/src/objects/js-objects.h
++++ b/src/objects/js-objects.h
+@@ -540,11 +540,13 @@ V8_OBJECT class JSObject : public JSReceiver {
+                                           PropertyAttributes attributes = NONE);
+ 
+   // Adds or reconfigures a property to attributes NONE. It will fail when it
+-  // cannot.
++  // cannot. With kDefine, a named interceptor's definer is asked first. [[Set]]
++  // passes kSet: a [[Set]] that adds a property does not call the definer.
+   V8_WARN_UNUSED_RESULT static Maybe<bool> CreateDataProperty(
+       Isolate* isolate, DirectHandle<JSObject> object, PropertyKey key,
+       DirectHandle<Object> value,
+-      Maybe<ShouldThrow> should_throw = Just(kDontThrow));
++      Maybe<ShouldThrow> should_throw = Just(kDontThrow),
++      EnforceDefineSemantics semantics = EnforceDefineSemantics::kDefine);
+ 
+   V8_EXPORT_PRIVATE static void AddProperty(Isolate* isolate,
+                                             DirectHandle<JSObject> object,
+diff --git a/src/objects/objects.cc b/src/objects/objects.cc
+index e55ab41..9b5eda9 100644
+--- a/src/objects/objects.cc
++++ b/src/objects/objects.cc
+@@ -2659,6 +2659,13 @@ Maybe<bool> Object::SetSuperProperty(LookupIterator* it,
+                                                     should_throw)) {
+             return Nothing<bool>();
+           }
++          if (IsJSObject(*receiver)) {
++            // A [[Set]] that adds a property does not call the interceptor's
++            // definer.
++            return JSObject::CreateDataProperty(
++                isolate, Cast<JSObject>(receiver), it->GetKey(), value,
++                should_throw, EnforceDefineSemantics::kSet);
++          }
+           return JSReceiver::CreateDataProperty(isolate, receiver, it->GetKey(),
+                                                 value, should_throw);
+         }
+diff --git a/test/cctest/test-api-interceptors.cc b/test/cctest/test-api-interceptors.cc
+index a62476a..a2abe50 100644
+--- a/test/cctest/test-api-interceptors.cc
++++ b/test/cctest/test-api-interceptors.cc
+@@ -2946,6 +2946,80 @@ THREADED_TEST(PropertyDefinerCallbackInDefineNamedOwnIC) {
+   }
+ }
+ 
++namespace {
++int create_data_property_definer_calls = 0;
++v8::Intercepted CountDefinerCallsAndContinueCallback(
++    Local<Name> name, const v8::PropertyDescriptor& desc,
++    const v8::PropertyCallbackInfo<Boolean>& info) {
++  create_data_property_definer_calls++;
++  CHECK(desc.has_value());
++  return v8::Intercepted::kNo;
++}
++
++void CheckPropertyDefinerCallbackInCreateDataProperty(Local<Context> context) {
++  v8::Local<v8::FunctionTemplate> templ =
++      v8::FunctionTemplate::New(CcTest::isolate());
++  templ->InstanceTemplate()->SetHandler(v8::NamedPropertyHandlerConfiguration(
++      nullptr, nullptr, nullptr, nullptr, nullptr,
++      CountDefinerCallsAndContinueCallback));
++  context->Global()
++      ->Set(context, v8_str("Cls"),
++            templ->GetFunction(context).ToLocalChecked())
++      .FromJust();
++
++  // Every instance, including those created once the field initializer has
++  // feedback.
++  create_data_property_definer_calls = 0;
++  CHECK(CompileRun("class WithFields extends Cls {"
++                   "  field = 1;"
++                   "  ['computed'] = 2;"
++                   "}"
++                   "let ok = true;"
++                   "for (let i = 0; i < 20; i++) {"
++                   "  const o = new WithFields();"
++                   "  ok = ok && o.field === 1 && o.computed === 2;"
++                   "}"
++                   "ok")
++            ->IsTrue());
++  CHECK_EQ(40, create_data_property_definer_calls);
++
++  create_data_property_definer_calls = 0;
++  Local<Object> obj =
++      templ->InstanceTemplate()->NewInstance(context).ToLocalChecked();
++  CHECK(obj->CreateDataProperty(context, v8_str("api"), v8_num(3)).FromJust());
++  CHECK_EQ(1, create_data_property_definer_calls);
++  CHECK_EQ(3, obj->Get(context, v8_str("api"))
++                  .ToLocalChecked()
++                  ->Int32Value(context)
++                  .FromJust());
++
++  // Assignments do not call the definer.
++  context->Global()->Set(context, v8_str("obj"), obj).FromJust();
++  create_data_property_definer_calls = 0;
++  CHECK_EQ(4, CompileRun("for (let i = 0; i < 20; i++) obj['p' + i] = 4;"
++                         "obj.p19")
++                  ->Int32Value(context)
++                  .FromJust());
++  CHECK_EQ(0, create_data_property_definer_calls);
++}
++}  // namespace
++
++THREADED_TEST(PropertyDefinerCallbackInCreateDataProperty) {
++  {
++    LocalContext env;
++    v8::HandleScope scope(env.isolate());
++    CheckPropertyDefinerCallbackInCreateDataProperty(env.local());
++  }
++
++  {
++    i::v8_flags.lazy_feedback_allocation = false;
++    i::FlagList::EnforceFlagImplications();
++    LocalContext env;
++    v8::HandleScope scope(env.isolate());
++    CheckPropertyDefinerCallbackInCreateDataProperty(env.local());
++  }
++}
++
+ namespace {
+ v8::Intercepted EmptyPropertyDescriptorCallback(
+     Local<Name> name, const v8::PropertyCallbackInfo<v8::Value>& info) {
