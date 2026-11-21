@@ -13,7 +13,7 @@ index 84fc2723322..a29e7319a5a 100644
  // Flags for Ignition.
  DEFINE_BOOL(ignition_elide_noneffectful_bytecodes, true,
 diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
-index 95692fb8139..9c002a31f46 100644
+index 95692fb8139..2152f6bab16 100644
 --- a/src/ic/accessor-assembler.cc
 +++ b/src/ic/accessor-assembler.cc
 @@ -2200,6 +2200,8 @@ void AccessorAssembler::HandleStoreICProtoHandler(
@@ -25,14 +25,14 @@ index 95692fb8139..9c002a31f46 100644
        TNode<Object> result = CallBuiltin(
            Builtin::kCallNamedInterceptorSetter, p->context(), p->name(),
            interceptor_info, receiver,
-@@ -2212,6 +2214,52 @@ void AccessorAssembler::HandleStoreICProtoHandler(
+@@ -2212,6 +2214,62 @@ void AccessorAssembler::HandleStoreICProtoHandler(
  
        BIND(&if_not_intercepted);
        {
 +        // The setter has already run, so every bailout from here on must
 +        // continue the store in the runtime; a miss would call it again.
 +        Label store_past_interceptor(this, Label::kDeferred);
-+        if (ic_mode != ICMode::kGlobalIC) {
++        if (ic_mode != ICMode::kGlobalIC && !p->IsAnyDefineOwn()) {
 +          // Overwrite the own writable data field found at IC compute time.
 +          // The setter may have changed the receiver arbitrarily, but
 +          // changing a field's location or attributes installs a new map, and
@@ -50,6 +50,16 @@ index 95692fb8139..9c002a31f46 100644
 +              Signed(DecodeWordFromWord32<
 +                     StoreHandler::InterceptorOwnFieldDescriptorBits>(
 +                  handler_word));
++          CSA_DCHECK(this, Word32BinaryNot(IsDictionaryMap(receiver_map)));
++          CSA_DCHECK(this, IsClearWord32<Map::Bits1::IsAccessCheckNeededBit>(
++                               LoadMapBitField(receiver_map)));
++          CSA_DCHECK(
++              this,
++              UintPtrLessThan(
++                  Unsigned(descriptor),
++                  ChangeUint32ToWord(
++                      DecodeWord32<Map::Bits3::NumberOfOwnDescriptorsBits>(
++                          LoadMapBitField3(receiver_map)))));
 +          TNode<IntPtrT> name_index = DescriptorEntryToIndex(descriptor);
 +          GotoIf(TaggedNotEqual(LoadKeyByKeyIndex(descriptors, name_index),
 +                                p->name()),
@@ -260,7 +270,7 @@ index 563e98a72dc..da449bfd2d0 100644
    V(StoreIC_StoreInterceptorThroughPrototypeDH)   \
    V(StoreIC_StoreNativeDataPropertyDH)            \
 diff --git a/test/cctest/test-api-interceptors.cc b/test/cctest/test-api-interceptors.cc
-index a62476ad3f5..f6bb21a9bc9 100644
+index a62476ad3f5..5faaababea7 100644
 --- a/test/cctest/test-api-interceptors.cc
 +++ b/test/cctest/test-api-interceptors.cc
 @@ -10,6 +10,7 @@
@@ -271,7 +281,7 @@ index a62476ad3f5..f6bb21a9bc9 100644
  #include "src/objects/objects-inl.h"
  #include "src/objects/objects.h"
  #include "src/runtime/runtime.h"
-@@ -7157,3 +7158,632 @@ THREADED_TEST(HasOwnPropertyWithInterceptorThrow) {
+@@ -7157,3 +7158,699 @@ THREADED_TEST(HasOwnPropertyWithInterceptorThrow) {
      CHECK(result->StrictEquals(v8_str("interceptor exception")));
    }
  }
@@ -361,6 +371,39 @@ index a62476ad3f5..f6bb21a9bc9 100644
 +
 +void DeclinedStoreUseIC(const v8::FunctionCallbackInfo<Value>& info) {
 +  info.GetReturnValue().Set(i::v8_flags.use_ic.value());
++}
++
++// GC stress can clear feedback and the megamorphic stub cache between stores.
++void DeclinedStoreGCStress(const v8::FunctionCallbackInfo<Value>& info) {
++  info.GetReturnValue().Set(
++      i::v8_flags.stress_compaction || i::v8_flags.gc_interval >= 0 ||
++      i::v8_flags.stress_incremental_marking ||
++      i::v8_flags.stress_scavenge > 0 || i::v8_flags.gc_global);
++}
++
++// gc(object, kind) with kind "minor", "major" or "compact"; "compact" forces
++// the pages of {object} and its property array to be evacuated.
++void DeclinedStoreGC(const v8::FunctionCallbackInfo<Value>& info) {
++  i::Heap* heap = CcTest::heap();
++  v8::String::Utf8Value kind(info.GetIsolate(), info[1]);
++  if (strcmp(*kind, "minor") == 0) {
++    i::heap::InvokeMinorGC(heap);
++    return;
++  }
++  if (strcmp(*kind, "compact") == 0) {
++    i::Handle<i::JSObject> object =
++        i::Cast<i::JSObject>(v8::Utils::OpenHandle(*info[0].As<Object>()));
++    // Promote first, so that the objects are on old-space pages.
++    i::heap::InvokeMajorGC(heap);
++    i::heap::ForceEvacuationCandidate(i::NormalPage::FromHeapObject(*object));
++    if (object->HasFastProperties() &&
++        object->property_array() !=
++            i::ReadOnlyRoots(CcTest::heap()).empty_property_array()) {
++      i::heap::ForceEvacuationCandidate(
++          i::NormalPage::FromHeapObject(object->property_array()));
++    }
++  }
++  i::heap::InvokeMajorGC(heap);
 +}
 +
 +void DeclinedStoreIsInobject(const v8::FunctionCallbackInfo<Value>& info) {
@@ -471,6 +514,7 @@ index a62476ad3f5..f6bb21a9bc9 100644
 +    if (observed === 'n/a') return;
 +    if (expected === 'fast' && !fastPathEnabled()) expected = 'runtime';
 +    if (expected === 'slow' && observed !== 'fast') return;
++    if (observed === 'miss' && gcStress()) return;
 +    check(observed === expected,
 +          current_case + ': store took ' + observed + ', expected ' + expected);
 +  }
@@ -560,6 +604,8 @@ index a62476ad3f5..f6bb21a9bc9 100644
 +      {"pastInterceptorCalls", DeclinedStorePastInterceptorCalls},
 +      {"fastPathEnabled", DeclinedStoreFastPathEnabled},
 +      {"useIC", DeclinedStoreUseIC},
++      {"gcStress", DeclinedStoreGCStress},
++      {"gc", DeclinedStoreGC},
 +  };
 +  for (const auto& [name, callback] : natives) {
 +    global
@@ -632,7 +678,7 @@ index a62476ad3f5..f6bb21a9bc9 100644
 +          if (path === 'fast') fast++;
 +        }
 +      }
-+      check(fastPathEnabled() ? fast * 2 >= checked : fast === 0,
++      check(fastPathEnabled() ? gcStress() || fast * 2 >= checked : fast === 0,
 +            fast + ' of ' + checked + ' megamorphic stores were fast');
 +      return objects.map(desc).join(' ');
 +    });
@@ -901,6 +947,37 @@ index a62476ad3f5..f6bb21a9bc9 100644
 +      strictContextual(i + 100);
 +      check(x === i + 100 && calls() - before === 0,
 +            'strict contextual ' + (calls() - before));
++    }
++  )");
++}
++
++TEST(DeclinedInterceptorStoreGCInSetter) {
++  v8::Isolate* isolate = CcTest::isolate();
++  i::ManualGCScope manual_gc_scope;
++  i::heap::ManualEvacuationCandidatesSelectionScope selection_scope(
++      manual_gc_scope);
++  v8::HandleScope scope(isolate);
++  LocalContext env;
++  SetUpDeclinedStoreTest(isolate, env.local());
++  // The setter moves the receiver, its property array and mutable heap
++  // number boxes before declining.
++  RunDeclinedStoreScript(isolate, R"(
++    for (const kind of ['minor', 'major', 'compact']) {
++      for (const [type, init, value] of [['smi', 0, i => i],
++                                         ['double', 0.5, i => i + 0.5],
++                                         ['tagged', 'a', i => 'v' + i]]) {
++        compare('gc ' + kind + ' ' + type, ({set}) => {
++          const shape = () => make({['g_' + kind + type]: init, x: init});
++          warm(set, shape, value);
++          const o = shape();
++          const sibling = shape();
++          onSet = (holder, n, v) => { if (holder === o) gc(holder, kind); };
++          for (let i = 100; i < 104; i++) expectPath(set(o, value(i)), 'fast');
++          onSet = undefined;
++          check(o.x === value(103) && sibling.x === init, 'values');
++          return desc(o) + ' ' + desc(sibling);
++        });
++      }
 +    }
 +  )");
 +}
