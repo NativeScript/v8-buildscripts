@@ -8,7 +8,7 @@ on:
       platforms:
         description: Which platforms to build
         type: choice
-        options: [all, android, ios]
+        options: [all, android, ios, android-intl]
         default: all
   push:
     branches: [main]
@@ -55,19 +55,20 @@ jobs:
 
   android:
     needs: config
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'android' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || startsWith(inputs.platforms, 'android') || inputs.platforms == 'all' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      matrix:
-        abi: [arm64-v8a, x86_64, armeabi-v7a, x86]
+      matrix: ${{ fromJSON(inputs.platforms == 'android-intl' && '{"include":[{"abi":"arm64-v8a","profile":"intl","artifact":"arm64-v8a-intl"},{"abi":"arm64-v8a","profile":"intl-a73","artifact":"arm64-v8a-intl-a73"}]}' || '{"abi":["arm64-v8a","x86_64","armeabi-v7a","x86"]}') }}
     # The R2 bucket has two prefixes with separate lifecycle rules:
     # artifacts/<inputs-hash>/ holds finished tarballs (expired quickly; a miss
     # just means building, as before) and sccache/ holds the compiler cache
     # (kept long). Every R2 step is skipped when the secrets are absent, e.g.
     # on a fork PR, and the build then runs exactly as it would without R2.
     env:
+      ARTIFACT: ${{ matrix.artifact || matrix.abi }}
+      PROFILE: ${{ matrix.profile || 'default' }}
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -87,8 +88,8 @@ jobs:
         id: cache
         if: env.AWS_ACCESS_KEY_ID != ''
         run: |
-          keys="v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz"
-          if [ "${{ matrix.abi }}" = "arm64-v8a" ]; then
+          keys="v8-${{ needs.config.outputs.v8_version }}-android-$ARTIFACT.tar.gz"
+          if [ "$ARTIFACT" = "arm64-v8a" ]; then
             keys="$keys v8-${{ needs.config.outputs.v8_version }}-src-headers.tar.gz"
           fi
           prefix="artifacts/${{ needs.config.outputs.inputs_hash }}"
@@ -146,25 +147,33 @@ jobs:
       - name: Build ${{ matrix.abi }}
         if: steps.cache.outputs.hit != 'true'
         run: >
-          scripts/matrix/build-android.sh --abi ${{ matrix.abi }}
+          scripts/matrix/build-android.sh --abi ${{ matrix.abi }} --profile "$PROFILE"
           ${{ env.AWS_ACCESS_KEY_ID != '' && '--cc-wrapper sccache' || '' }}
 
       - name: sccache stats
         if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
         run: sccache --show-stats
 
+      - name: Link Android Intl and WebAssembly smoke test with the consumer NDK
+        if: matrix.profile && steps.cache.outputs.hit != 'true'
+        run: |
+          dist="dist/android-$ARTIFACT"
+          "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++" \
+            -std=c++20 -Os -Wl,--gc-sections -I"$dist/include" tests/android-intl-smoke.cc \
+            "$dist/lib/libv8_monolith.a" -static-libstdc++ -llog -landroid -latomic -ldl -lm -o "$dist/intl-smoke"
+
       - name: Package
         if: steps.cache.outputs.hit != 'true'
         run: |
-          tar -czf "v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz" \
-            -C dist "android-${{ matrix.abi }}"
+          tar -czf "v8-${{ needs.config.outputs.v8_version }}-android-$ARTIFACT.tar.gz" \
+            -C dist "android-$ARTIFACT"
 
       # The internal headers are architecture-independent, so one job produces
       # them. It piggybacks on a build rather than getting its own job because
       # src/inspector/protocol/*.h are generated into gen/ and only exist once
       # something has been built.
       - name: Package the internal headers
-        if: matrix.abi == 'arm64-v8a' && steps.cache.outputs.hit != 'true'
+        if: matrix.abi == 'arm64-v8a' && !matrix.profile && steps.cache.outputs.hit != 'true'
         run: |
           scripts/matrix/package-src-headers.sh \
             --gen-dir .v8/v8/out.gn/android-arm64-release/gen
@@ -181,12 +190,12 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: v8-android-${{ matrix.abi }}
-          path: v8-*-android-${{ matrix.abi }}.tar.gz
+          name: v8-android-${{ env.ARTIFACT }}
+          path: v8-*-android-${{ env.ARTIFACT }}.tar.gz
           retention-days: 7
 
       - uses: actions/upload-artifact@v7
-        if: matrix.abi == 'arm64-v8a'
+        if: matrix.abi == 'arm64-v8a' && !matrix.profile
         with:
           name: v8-src-headers
           path: v8-*-src-headers.tar.gz

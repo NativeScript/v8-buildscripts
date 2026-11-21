@@ -199,3 +199,16 @@ The existing iOS and Catalyst arguments are unchanged.
 
 Run `python3 tests/apple-args.py` on macOS to check the emitted GN arguments
 for all seven Apple variants without compiling V8.
+# Optional Android Intl artifacts
+
+Select `android-intl` in **Build V8 matrix** to produce two Android arm64
+artifacts with built-in ICU data, WebAssembly, and JIT. The `intl` artifact
+targets baseline arm64-v8a; `intl-a73` requires ARM CRC and crypto extensions
+and is tuned for Cortex-A73. Do not ship the tuned archive as a generic arm64
+library. Existing releases and compact default builds are unchanged.
+
+Both variants optimize for size, use ThinLTO without PGO, and ship a native
+relocatable object in the monolithic archive so consumers do not need the
+producer's LLVM bitcode reader. CI links `intl-smoke` against the archive with
+the pinned Android NDK. Run that executable on a compatible Android device;
+exit status zero checks localized number formatting and WebAssembly instantiation.

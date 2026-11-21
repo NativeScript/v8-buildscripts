@@ -67,3 +67,24 @@ index 1e07ac0e7..6927ba1ef 100644
  
    public_android_sdk_root = "//third_party/android_sdk/public"
    public_android_sdk_platform_version = "37.0"
+diff --git a/config/compiler/BUILD.gn b/config/compiler/BUILD.gn
+--- a/config/compiler/BUILD.gn
++++ b/config/compiler/BUILD.gn
+@@ -50,4 +50,7 @@
+ declare_args() {
+   # This allows overriding the location of lld.
+   lld_path = default_lld_path
++
++  # Optional target profile; never change host snapshot tool instructions.
++  android_tune_cortex_a73 = false
+ }
+@@ -1374,6 +1377,9 @@
+     } else if (current_cpu == "arm64") {
++      if (is_android && android_tune_cortex_a73) {
++        cflags += [ "-march=armv8-a+crc+crypto", "-mtune=cortex-a73" ]
++      }
+       if (is_clang && !is_android && !is_fuchsia && !is_chromeos_device) {
+         cflags += [ "--target=aarch64-linux-gnu" ]
+         ldflags += [ "--target=aarch64-linux-gnu" ]
+       }
+       if (target_os == "chromeos" && cros_target_cpu_arch != "" &&
