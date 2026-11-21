@@ -1,0 +1,906 @@
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 84fc2723322..a29e7319a5a 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -1196,6 +1196,9 @@ DEFINE_BOOL(use_ic, true, "use inline caching")
+ // avoid having production path untested).
+ DEFINE_BOOL(lazy_feedback_allocation, true, "Allocate feedback vectors lazily")
+ DEFINE_BOOL(stress_ic, false, "exercise interesting paths in ICs more often")
++DEFINE_BOOL(store_ic_declined_interceptor_fast_path, true,
++            "let store IC handlers overwrite an existing own data field "
++            "after a masking named interceptor setter declines the store")
+ 
+ // Flags for Ignition.
+ DEFINE_BOOL(ignition_elide_noneffectful_bytecodes, true,
+diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
+index 95692fb8139..9c002a31f46 100644
+--- a/src/ic/accessor-assembler.cc
++++ b/src/ic/accessor-assembler.cc
+@@ -2200,6 +2200,8 @@ void AccessorAssembler::HandleStoreICProtoHandler(
+       TNode<InterceptorInfo> interceptor_info =
+           CAST(LoadHandlerDataField(handler, 2));
+ 
++      TNode<Map> receiver_map = LoadMap(receiver);
++
+       TNode<Object> result = CallBuiltin(
+           Builtin::kCallNamedInterceptorSetter, p->context(), p->name(),
+           interceptor_info, receiver,
+@@ -2212,6 +2214,52 @@ void AccessorAssembler::HandleStoreICProtoHandler(
+ 
+       BIND(&if_not_intercepted);
+       {
++        // The setter has already run, so every bailout from here on must
++        // continue the store in the runtime; a miss would call it again.
++        Label store_past_interceptor(this, Label::kDeferred);
++        if (ic_mode != ICMode::kGlobalIC) {
++          // Overwrite the own writable data field found at IC compute time.
++          // The setter may have changed the receiver arbitrarily, but
++          // changing a field's location or attributes installs a new map, and
++          // the field's constness, representation and type are re-checked by
++          // OverwriteExistingFastDataProperty().
++          GotoIfNot(
++              IsSetWord32<StoreHandler::InterceptorOwnFieldBits>(handler_word),
++              &store_past_interceptor);
++          GotoIf(TaggedNotEqual(LoadMap(receiver), receiver_map),
++                 &store_past_interceptor);
++          GotoIf(IsDeprecatedMap(receiver_map), &store_past_interceptor);
++
++          TNode<DescriptorArray> descriptors = LoadMapDescriptors(receiver_map);
++          TNode<IntPtrT> descriptor =
++              Signed(DecodeWordFromWord32<
++                     StoreHandler::InterceptorOwnFieldDescriptorBits>(
++                  handler_word));
++          TNode<IntPtrT> name_index = DescriptorEntryToIndex(descriptor);
++          GotoIf(TaggedNotEqual(LoadKeyByKeyIndex(descriptors, name_index),
++                                p->name()),
++                 &store_past_interceptor);
++          TNode<Uint32T> details =
++              LoadDetailsByKeyIndex(descriptors, name_index);
++          static_assert(static_cast<int>(PropertyKind::kData) == 0);
++          GotoIf(IsSetWord32(details,
++                             PropertyDetails::KindField::kMask |
++                                 PropertyDetails::kAttributesReadOnlyMask),
++                 &store_past_interceptor);
++          GotoIfNot(
++              Word32Equal(DecodeWord32<PropertyDetails::LocationField>(details),
++                          Int32Constant(
++                              static_cast<int32_t>(PropertyLocation::kField))),
++              &store_past_interceptor);
++          OverwriteExistingFastDataProperty(receiver, receiver_map, descriptors,
++                                            name_index, details, p->value(),
++                                            &store_past_interceptor, false);
++          Return(p->value());
++        } else {
++          Goto(&store_past_interceptor);
++        }
++
++        BIND(&store_past_interceptor);
+         TailCallRuntime(Runtime::kStorePropertyPastInterceptor, p->context(),
+                         p->value(), receiver, p->name(), interceptor_info);
+       }
+diff --git a/src/ic/handler-configuration.cc b/src/ic/handler-configuration.cc
+index eb297de6691..934fb04f5d8 100644
+--- a/src/ic/handler-configuration.cc
++++ b/src/ic/handler-configuration.cc
+@@ -446,8 +446,14 @@ Handle<Object> StoreHandler::StoreThroughPrototype(
+ // static
+ Handle<StoreHandler> StoreHandler::StoreInterceptorHolderIsReceiver(
+     Isolate* isolate, DirectHandle<Map> lookup_start_object_map,
+-    DirectHandle<InterceptorInfo> interceptor_info) {
++    DirectHandle<InterceptorInfo> interceptor_info, InternalIndex own_field) {
+   Tagged<Smi> smi_handler = StoreInterceptor(interceptor_info->non_masking());
++  if (own_field.is_found()) {
++    DCHECK(!interceptor_info->non_masking());
++    smi_handler = SetBitFieldValue<InterceptorOwnFieldBits>(smi_handler, true);
++    smi_handler = SetBitFieldValue<InterceptorOwnFieldDescriptorBits>(
++        smi_handler, own_field.as_uint32());
++  }
+ 
+   bool access_check_needed = lookup_start_object_map->is_access_check_needed();
+ 
+@@ -626,7 +632,13 @@ void PrintSmiStoreHandler(int raw_handler, std::ostream& os) {
+       os << "kNormal";
+       break;
+     case StoreHandler::Kind::kInterceptor:
+-      os << "kInterceptor";
++      os << "kInterceptor, non masking = "
++         << StoreHandler::NonMaskingInterceptorBits::decode(raw_handler);
++      if (StoreHandler::InterceptorOwnFieldBits::decode(raw_handler)) {
++        os << ", own field descriptor = "
++           << StoreHandler::InterceptorOwnFieldDescriptorBits::decode(
++                  raw_handler);
++      }
+       break;
+     case StoreHandler::Kind::kSlow: {
+       KeyedAccessStoreMode keyed_access_store_mode =
+diff --git a/src/ic/handler-configuration.h b/src/ic/handler-configuration.h
+index 10d4055f1f2..15794eb41ff 100644
+--- a/src/ic/handler-configuration.h
++++ b/src/ic/handler-configuration.h
+@@ -272,6 +272,15 @@ V8_OBJECT class StoreHandler final : public DataHandler {
+   // Encodes whether the inteceptor is masking or non-masking.
+   using NonMaskingInterceptorBits =
+       LookupOnLookupStartObjectBits::Next<bool, 1>;
++  // Set when the lookup start object map has an own writable data field for
++  // the name, which the handler may overwrite in place when a masking
++  // interceptor's setter declines the store.
++  using InterceptorOwnFieldBits = NonMaskingInterceptorBits::Next<bool, 1>;
++  // Descriptor index of that field.
++  using InterceptorOwnFieldDescriptorBits =
++      InterceptorOwnFieldBits::Next<unsigned, kDescriptorIndexBitCount>;
++  static_assert(InterceptorOwnFieldDescriptorBits::kLastUsedBit <
++                kSmiValueSize);
+ 
+   // Applicable to kField, kAccessor and kNativeDataProperty.
+ 
+@@ -358,10 +367,12 @@ V8_OBJECT class StoreHandler final : public DataHandler {
+   // (StoreThroughPrototype(..) or StoreInterceptorHolderIsReceiver(..)).
+   static inline Tagged<Smi> StoreInterceptor(bool non_masking);
+   // Creates handler for storing a property to receiver object with an
+-  // interceptor.
++  // interceptor. {own_field} is the descriptor of an own writable data field
++  // the handler may overwrite when a masking interceptor declines the store.
+   static Handle<StoreHandler> StoreInterceptorHolderIsReceiver(
+       Isolate* isolate, DirectHandle<Map> holder_map,
+-      DirectHandle<InterceptorInfo> interceptor_info);
++      DirectHandle<InterceptorInfo> interceptor_info,
++      InternalIndex own_field = InternalIndex::NotFound());
+ 
+   static inline Handle<Code> StoreSloppyArgumentsBuiltin(
+       Isolate* isolate, KeyedAccessStoreMode mode);
+diff --git a/src/ic/ic.cc b/src/ic/ic.cc
+index 4ef3e204ecf..d755c3aab1e 100644
+--- a/src/ic/ic.cc
++++ b/src/ic/ic.cc
+@@ -2206,6 +2206,48 @@ void StoreIC::UpdateCaches(LookupIterator* lookup, DirectHandle<Object> value,
+   TraceIC("StoreIC", lookup->GetName());
+ }
+ 
++namespace {
++
++// Returns the descriptor of the own writable data field that a store to
++// {lookup}'s receiver writes after a masking interceptor's setter declines,
++// if the store handler can overwrite it in place without a runtime call.
++// UpdateCaches() runs before the setter is called, so this must not have side
++// effects (e.g. no LookupIterator::PrepareForDataProperty()).
++InternalIndex FindOwnFieldPastInterceptor(Isolate* isolate,
++                                          LookupIterator* lookup,
++                                          DirectHandle<Map> receiver_map) {
++  if (!v8_flags.store_ic_declined_interceptor_fast_path) {
++    return InternalIndex::NotFound();
++  }
++  DirectHandle<JSAny> receiver = lookup->GetReceiver();
++  if (lookup->IsElement() || !IsJSObject(*receiver) ||
++      Cast<JSObject>(*receiver)->map() != *receiver_map ||
++      receiver_map->is_dictionary_map() || receiver_map->is_deprecated() ||
++      receiver_map->is_access_check_needed() ||
++      IsJSGlobalProxyMap(*receiver_map) || IsJSGlobalObjectMap(*receiver_map)) {
++    return InternalIndex::NotFound();
++  }
++  DirectHandle<Name> name = lookup->GetName();
++  // The handler does not update protectors.
++  if (ReadOnlyRoots(isolate).IsNameForProtector(*name)) {
++    return InternalIndex::NotFound();
++  }
++  DirectHandle<JSObject> object = Cast<JSObject>(receiver);
++  LookupIterator it(isolate, object, name, object,
++                    LookupIterator::OWN_SKIP_INTERCEPTOR);
++  if (it.state() != LookupIterator::DATA || !it.HolderIsReceiver()) {
++    return InternalIndex::NotFound();
++  }
++  PropertyDetails details = it.property_details();
++  if (details.kind() != PropertyKind::kData ||
++      details.location() != PropertyLocation::kField || details.IsReadOnly()) {
++    return InternalIndex::NotFound();
++  }
++  return it.descriptor_number();
++}
++
++}  // namespace
++
+ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
+   switch (lookup->state()) {
+     case LookupIterator::TRANSITION: {
+@@ -2277,13 +2319,22 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
+             TRACE_HANDLER_STATS(isolate(),
+                                 StoreIC_StoreInterceptorNonMaskingDH);
+           }
++          InternalIndex own_field = InternalIndex::NotFound();
++          if (!info->non_masking()) {
++            own_field = FindOwnFieldPastInterceptor(isolate(), lookup,
++                                                    lookup_start_object_map());
++            if (own_field.is_found()) {
++              TRACE_HANDLER_STATS(isolate(),
++                                  StoreIC_StoreInterceptorOwnFieldDH);
++            }
++          }
+           // We use complex data handler in order to cache the holder and
+           // interceptor info while also being able to use validity cell
+           // guarding against prototype chain modifications necessary for
+           // non-masking interceptors.
+           Handle<StoreHandler> handler =
+               StoreHandler::StoreInterceptorHolderIsReceiver(
+-                  isolate(), lookup_start_object_map(), info);
++                  isolate(), lookup_start_object_map(), info, own_field);
+           return MaybeObjectHandle(handler);
+         }
+         // If the interceptor does not have setter of if the IC is a
+@@ -4390,6 +4441,7 @@ RUNTIME_FUNCTION(Runtime_StorePropertyPastInterceptor) {
+   DirectHandle<JSObject> receiver = args.at<JSObject>(1);
+   DirectHandle<Name> name = args.at<Name>(2);
+   DirectHandle<InterceptorInfo> interceptor = args.at<InterceptorInfo>(3);
++  isolate->counters()->store_property_past_interceptor()->Increment();
+ 
+   DirectHandle<JSObject> holder = receiver;
+ #ifdef DEBUG
+diff --git a/src/logging/counters-definitions.h b/src/logging/counters-definitions.h
+index 28e92eef33c..52b27600f18 100644
+--- a/src/logging/counters-definitions.h
++++ b/src/logging/counters-definitions.h
+@@ -380,7 +380,8 @@ namespace internal {
+   SC(number_string_cache_smi_probes, V8.NumberStringCacheSmiProbes)       \
+   SC(number_string_cache_smi_misses, V8.NumberStringCacheSmiMisses)       \
+   SC(number_string_cache_double_probes, V8.NumberStringCacheDoubleProbes) \
+-  SC(number_string_cache_double_misses, V8.NumberStringCacheDoubleMisses)
++  SC(number_string_cache_double_misses, V8.NumberStringCacheDoubleMisses) \
++  SC(store_property_past_interceptor, V8.StorePropertyPastInterceptor)
+ 
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/logging/runtime-call-stats.h b/src/logging/runtime-call-stats.h
+index 563e98a72dc..da449bfd2d0 100644
+--- a/src/logging/runtime-call-stats.h
++++ b/src/logging/runtime-call-stats.h
+@@ -500,6 +500,7 @@ namespace v8::internal {
+   V(StoreIC_StoreGlobalTransitionDH)              \
+   V(StoreIC_StoreInterceptorDH)                   \
+   V(StoreIC_StoreInterceptorNonMaskingDH)         \
++  V(StoreIC_StoreInterceptorOwnFieldDH)           \
+   V(StoreIC_StoreInterceptorSlowDH)               \
+   V(StoreIC_StoreInterceptorThroughPrototypeDH)   \
+   V(StoreIC_StoreNativeDataPropertyDH)            \
+diff --git a/test/cctest/test-api-interceptors.cc b/test/cctest/test-api-interceptors.cc
+index a62476ad3f5..f6bb21a9bc9 100644
+--- a/test/cctest/test-api-interceptors.cc
++++ b/test/cctest/test-api-interceptors.cc
+@@ -10,6 +10,7 @@
+ #include "src/api/api-inl.h"
+ #include "src/codegen/compilation-cache.h"
+ #include "src/execution/execution.h"
++#include "src/execution/frames-inl.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/objects.h"
+ #include "src/runtime/runtime.h"
+@@ -7157,3 +7158,632 @@ THREADED_TEST(HasOwnPropertyWithInterceptorThrow) {
+     CHECK(result->StrictEquals(v8_str("interceptor exception")));
+   }
+ }
++
++namespace {
++
++// Masking named interceptor setter that counts its calls, lets the test run
++// arbitrary side effects through globalThis.onSet(holder, name, value) and
++// always declines.
++int declined_store_setter_calls = 0;
++// Whether the last setter call came from a store IC handler rather than from
++// the runtime.
++bool declined_store_setter_called_from_handler = false;
++int declined_store_past_interceptor_calls = 0;
++
++int* LookupDeclinedStoreCounter(const char* name) {
++  if (strcmp(name, "c:V8.StorePropertyPastInterceptor") == 0) {
++    return &declined_store_past_interceptor_calls;
++  }
++  return nullptr;
++}
++
++v8::Intercepted DeclinedStoreSetter(
++    Local<Name> name, Local<Value> value,
++    const v8::PropertyCallbackInfo<Boolean>& info) {
++  declined_store_setter_calls++;
++  v8::Isolate* isolate = info.GetIsolate();
++  i::StackFrameIterator frames(reinterpret_cast<i::Isolate*>(isolate));
++  bool called_from_handler =
++      !frames.done() &&
++      frames.frame()->type() == i::StackFrame::API_NAMED_ACCESSOR_EXIT;
++  Local<Context> context = isolate->GetCurrentContext();
++  Local<Value> hook;
++  if (!context->Global()->Get(context, v8_str("onSet")).ToLocal(&hook)) {
++    return v8::Intercepted::kYes;
++  }
++  if (hook->IsFunction()) {
++    Local<Value> args[] = {info.Holder(), name, value};
++    if (hook.As<Function>()
++            ->Call(context, v8::Undefined(isolate), arraysize(args), args)
++            .IsEmpty()) {
++      return v8::Intercepted::kYes;
++    }
++  }
++  declined_store_setter_called_from_handler = called_from_handler;
++  return v8::Intercepted::kNo;
++}
++
++v8::Intercepted DeclinedStoreGetter(
++    Local<Name> name, const v8::PropertyCallbackInfo<v8::Value>& info) {
++  return v8::Intercepted::kNo;
++}
++
++bool DeclinedStoreAccessAllowed(Local<v8::Context> accessing_context,
++                                Local<v8::Object> accessed_object,
++                                Local<v8::Value> data) {
++  return true;
++}
++
++void DeclinedStoreSetterCalls(const v8::FunctionCallbackInfo<Value>& info) {
++  info.GetReturnValue().Set(declined_store_setter_calls);
++}
++
++// Classifies the last store: "fast" if the store IC handler completed it after
++// the setter declined, "runtime" if the handler continued in
++// Runtime_StorePropertyPastInterceptor, "miss" if the setter was called from
++// the runtime.
++void DeclinedStorePath(const v8::FunctionCallbackInfo<Value>& info) {
++  int past_interceptor_calls_before = info[0].As<v8::Int32>()->Value();
++  const char* path =
++      !declined_store_setter_called_from_handler ? "miss"
++      : declined_store_past_interceptor_calls == past_interceptor_calls_before
++          ? "fast"
++          : "runtime";
++  info.GetReturnValue().Set(v8_str(path));
++}
++
++void DeclinedStorePastInterceptorCalls(
++    const v8::FunctionCallbackInfo<Value>& info) {
++  info.GetReturnValue().Set(declined_store_past_interceptor_calls);
++}
++
++void DeclinedStoreFastPathEnabled(const v8::FunctionCallbackInfo<Value>& info) {
++  info.GetReturnValue().Set(
++      i::v8_flags.store_ic_declined_interceptor_fast_path.value());
++}
++
++void DeclinedStoreUseIC(const v8::FunctionCallbackInfo<Value>& info) {
++  info.GetReturnValue().Set(i::v8_flags.use_ic.value());
++}
++
++void DeclinedStoreIsInobject(const v8::FunctionCallbackInfo<Value>& info) {
++  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
++  i::DirectHandle<i::JSObject> object =
++      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*info[0]));
++  i::DirectHandle<i::Name> name = isolate->factory()->InternalizeString(
++      v8::Utils::OpenDirectHandle(*info[1].As<String>()));
++  i::LookupIterator it(isolate, object, name, object,
++                       i::LookupIterator::OWN_SKIP_INTERCEPTOR);
++  CHECK_EQ(i::LookupIterator::DATA, it.state());
++  CHECK(object->map()->has_named_interceptor());
++  info.GetReturnValue().Set(it.property_details().location() ==
++                                i::PropertyLocation::kField &&
++                            it.GetFieldIndex().is_inobject());
++}
++
++void AddDeclinedStoreConstructor(v8::Isolate* isolate, Local<Context> context,
++                                 const char* name,
++                                 v8::PropertyHandlerFlags flags,
++                                 bool with_getter = false,
++                                 bool with_access_check = false) {
++  Local<FunctionTemplate> templ = FunctionTemplate::New(isolate);
++  v8::NamedPropertyHandlerConfiguration conf(
++      with_getter ? DeclinedStoreGetter : nullptr, DeclinedStoreSetter);
++  conf.flags = flags;
++  templ->InstanceTemplate()->SetHandler(conf);
++  if (with_access_check) {
++    templ->InstanceTemplate()->SetAccessCheckCallback(
++        DeclinedStoreAccessAllowed);
++  }
++  context->Global()
++      ->Set(context, v8_str(name), templ->GetFunction(context).ToLocalChecked())
++      .FromJust();
++}
++
++// Every scenario runs twice: once storing through IC-ed store sites and once
++// through Reflect.set (always the generic runtime path). Both runs must call
++// the setter the expected number of times per store and end in the same
++// object state.
++const char* kDeclinedStorePrelude = R"(
++  var log = [];
++  var onSet;
++  var current_case = '';
++  function check(c, m) { if (!c) throw new Error('check failed: ' + m); }
++  function desc(o) {
++    const props = Reflect.ownKeys(o).map(k => {
++      const d = Object.getOwnPropertyDescriptor(o, k);
++      const v = !('value' in d) ? 'accessor' :
++          typeof d.value === 'object' ? JSON.stringify(d.value) :
++          typeof d.value + ':' + String(d.value);
++      return String(k) + '=' + v + ':' + (d.writable ? 'w' : '-') +
++          (d.enumerable ? 'e' : '-') + (d.configurable ? 'c' : '-');
++    });
++    return '{' + props.join(',') + '}' +
++        (Object.isExtensible(o) ? '' : ' non-extensible') +
++        (%HasFastProperties(o) ? '' : ' dictionary');
++  }
++  function make(init, C = T) {
++    const o = new C();
++    for (const k in init) o[k] = init[k];
++    return o;
++  }
++  class S extends T {
++    constructor() { super(); this.w = 0; this.x = 0; }
++  }
++  // The suffix keeps the compilation cache from sharing store sites (and
++  // their feedback) between setters.
++  var setters_created = 0;
++  function makeSetters(mode) {
++    const suffix = ' // ' + setters_created++;
++    const sloppy = new Function('o', 'v', 'o.x = v;' + suffix);
++    const strict = new Function('o', 'v', '"use strict"; o.x = v;' + suffix);
++    const keyed = new Function('o', 'k', 'v', 'o[k] = v;' + suffix);
++    function wrap(f, is_strict) {
++      return function(o, v, expected_calls = 1, k = 'x') {
++        if (arguments.length > 2 && arguments[2] === undefined) {
++          expected_calls = undefined;
++        }
++        const before = calls();
++        const runtime_before = pastInterceptorCalls();
++        try {
++          if (mode === 'ref') {
++            if (!Reflect.set(o, k, v) && is_strict) throw new TypeError();
++          } else if (f === keyed) {
++            f(o, k, v);
++          } else {
++            f(o, v);
++          }
++        } catch (e) {
++          log.push(e instanceof TypeError ? 'TypeError' : 'E:' + e);
++        }
++        const n = calls() - before;
++        check(expected_calls === undefined || n === expected_calls,
++              current_case + ' (' + mode + '): setter called ' + n +
++                  ' times, expected ' + expected_calls);
++        if (mode === 'ref' || !useIC() || n === 0) return 'n/a';
++        return storePath(runtime_before);
++      };
++    }
++    return {set: wrap(sloppy, false), sset: wrap(strict, true),
++            kset: wrap(keyed, false), store_site: sloppy, mode};
++  }
++  // Checks how an IC-ed store was completed. Stores through Reflect.set,
++  // stores with --no-use-ic and stores that don't call the setter are not
++  // checked.
++  function expectPath(observed, expected) {
++    if (observed === 'n/a') return;
++    if (expected === 'fast' && !fastPathEnabled()) expected = 'runtime';
++    if (expected === 'slow' && observed !== 'fast') return;
++    check(observed === expected,
++          current_case + ': store took ' + observed + ', expected ' + expected);
++  }
++  function warm(set, shape, value = i => i, expected_calls = 1) {
++    for (let i = 0; i < 12; i++) set(shape(), value(i), expected_calls);
++  }
++  function compare(name, run) {
++    const results = [];
++    current_case = name;
++    for (const mode of ['ic', 'ref']) {
++      log = [];
++      try {
++        results.push(run(makeSetters(mode)) + ' log=' + log.join(';'));
++      } finally {
++        onSet = undefined;
++      }
++    }
++    check(results[0] === results[1],
++          name + ':\n  ic:  ' + results[0] + '\n  ref: ' + results[1]);
++    return results[0];
++  }
++  // Runs {effect} from inside the setter on the store of 100 to {o}, with
++  // the store site already warmed up for {o}'s map.
++  function withEffect(name, effect, opts = {}) {
++    return compare(name, (s) => {
++      const keys = opts.keys || {['w_' + name]: 0, x: 0};
++      const shape = () => make(keys);
++      const store = opts.strict ? s.sset : s.set;
++      warm(store, shape);
++      const o = shape();
++      const sibling = shape();
++      store(o, 1);
++      // Setter calls made by the effect itself (nested stores, and
++      // Object.defineProperty, which also calls the setter) are not part of
++      // the store under test.
++      let busy = false;
++      let effect_calls = 0;
++      onSet = (holder, n, v) => {
++        if (v !== 100 || busy) return;
++        busy = true;
++        const before = calls();
++        try {
++          effect(holder, sibling);
++        } finally {
++          effect_calls = calls() - before;
++          busy = false;
++        }
++      };
++      const before = calls();
++      const p100 = store(o, 100, undefined);
++      check(calls() - before === 1 + effect_calls,
++            name + ': setter called ' + (calls() - before) + ' times');
++      onSet = undefined;
++      store(o, 101);
++      store(o, 102);
++      if (opts.path !== 'any') expectPath(p100, opts.path || 'runtime');
++      return desc(o) + ' ' + desc(sibling) + ' effect calls ' + effect_calls;
++    });
++  }
++)";
++
++void SetUpDeclinedStoreTest(v8::Isolate* isolate, Local<Context> context) {
++  i::v8_flags.allow_natives_syntax = true;
++  declined_store_setter_calls = 0;
++  declined_store_past_interceptor_calls = 0;
++  isolate->SetCounterFunction(LookupDeclinedStoreCounter);
++  AddDeclinedStoreConstructor(isolate, context, "T",
++                              v8::PropertyHandlerFlags::kNone);
++  AddDeclinedStoreConstructor(isolate, context, "TNonMasking",
++                              v8::PropertyHandlerFlags::kNonMasking);
++  AddDeclinedStoreConstructor(isolate, context, "TStringsOnly",
++                              v8::PropertyHandlerFlags::kOnlyInterceptStrings);
++  AddDeclinedStoreConstructor(isolate, context, "TWithGetter",
++                              v8::PropertyHandlerFlags::kNone, true);
++  AddDeclinedStoreConstructor(isolate, context, "TAccessChecked",
++                              v8::PropertyHandlerFlags::kNone, false, true);
++  Local<Object> global = context->Global();
++  global
++      ->Set(context, v8_str("calls"),
++            FunctionTemplate::New(isolate, DeclinedStoreSetterCalls)
++                ->GetFunction(context)
++                .ToLocalChecked())
++      .FromJust();
++  const std::pair<const char*, v8::FunctionCallback> natives[] = {
++      {"isInobject", DeclinedStoreIsInobject},
++      {"storePath", DeclinedStorePath},
++      {"pastInterceptorCalls", DeclinedStorePastInterceptorCalls},
++      {"fastPathEnabled", DeclinedStoreFastPathEnabled},
++      {"useIC", DeclinedStoreUseIC},
++  };
++  for (const auto& [name, callback] : natives) {
++    global
++        ->Set(context, v8_str(name),
++              FunctionTemplate::New(isolate, callback)
++                  ->GetFunction(context)
++                  .ToLocalChecked())
++        .FromJust();
++  }
++  CompileRun(kDeclinedStorePrelude);
++}
++
++void RunDeclinedStoreScript(v8::Isolate* isolate, const char* source) {
++  v8::TryCatch try_catch(isolate);
++  CompileRun(source);
++  if (try_catch.HasCaught()) {
++    v8::String::Utf8Value message(isolate, try_catch.Exception());
++    FATAL("%s", *message);
++  }
++}
++
++}  // namespace
++
++TEST(DeclinedInterceptorStoreOverwrite) {
++  v8::Isolate* isolate = CcTest::isolate();
++  v8::HandleScope scope(isolate);
++  LocalContext env;
++  SetUpDeclinedStoreTest(isolate, env.local());
++  RunDeclinedStoreScript(isolate, R"(
++    compare('monomorphic out-of-object', ({set}) => {
++      const shape = () => make({w: 0, x: 0});
++      warm(set, shape);
++      const o = shape();
++      check(!isInobject(o, 'x'), 'out-of-object');
++      for (let i = 0; i < 20; i++) expectPath(set(o, i), 'fast');
++      check(o.x === 19, 'value');
++      return desc(o);
++    });
++    compare('monomorphic in-object', ({set}) => {
++      const shape = () => new S();
++      warm(set, shape);
++      const o = shape();
++      check(isInobject(o, 'x'), 'in-object');
++      for (let i = 0; i < 20; i++) expectPath(set(o, i), 'fast');
++      check(o.x === 19, 'value');
++      return desc(o);
++    });
++    compare('polymorphic', ({set}) => {
++      const shapes = [() => make({p1: 0, x: 0}), () => make({p2: 0, x: 0}),
++                      () => make({p3: 0, p4: 0, x: 0})];
++      for (let i = 0; i < 12; i++) for (const shape of shapes) set(shape(), i);
++      const objects = shapes.map(shape => shape());
++      for (let i = 0; i < 20; i++) {
++        for (const o of objects) expectPath(set(o, i), 'fast');
++      }
++      return objects.map(desc).join(' ');
++    });
++    compare('megamorphic', ({set}) => {
++      const shapes = [];
++      for (let j = 0; j < 8; j++) shapes.push(() => make({['m' + j]: 0, x: 0}));
++      for (let i = 0; i < 12; i++) for (const shape of shapes) set(shape(), i);
++      const objects = shapes.map(shape => shape());
++      // Megamorphic stub cache collisions can turn a store into a miss.
++      let checked = 0, fast = 0;
++      for (let i = 0; i < 20; i++) {
++        for (const o of objects) {
++          const path = set(o, i);
++          if (path === 'n/a') continue;
++          checked++;
++          if (path === 'fast') fast++;
++        }
++      }
++      check(fastPathEnabled() ? fast * 2 >= checked : fast === 0,
++            fast + ' of ' + checked + ' megamorphic stores were fast');
++      return objects.map(desc).join(' ');
++    });
++    for (const tier of ['maglev', 'turbofan']) {
++      compare('optimized ' + tier, ({set, store_site, mode}) => {
++        const shape = () => make({['t_' + tier]: 0, x: 0});
++        warm(set, shape);
++        if (mode === 'ic') {
++          %PrepareFunctionForOptimization(store_site);
++          set(shape(), 0);
++          if (tier === 'maglev') {
++            %OptimizeMaglevOnNextCall(store_site);
++          } else {
++            %OptimizeFunctionOnNextCall(store_site);
++          }
++        }
++        const o = shape();
++        for (let i = 0; i < 10; i++) expectPath(set(o, i), 'fast');
++        if (mode === 'ic' && useIC()) {
++          const enabled =
++              tier === 'maglev' ? %IsMaglevEnabled() : %IsTurbofanEnabled();
++          const active = tier === 'maglev' ? %ActiveTierIsMaglev(store_site)
++                                           : %ActiveTierIsTurbofan(store_site);
++          check(active === enabled, tier + ' code');
++        }
++        expectPath(set(o, 'str'), 'runtime');
++        for (let i = 0; i < 10; i++) expectPath(set(o, i), 'fast');
++        return desc(o);
++      });
++    }
++    compare('keyed store with a constant name', ({kset}) => {
++      const shape = () => make({k1: 0, x: 0});
++      warm(kset, shape);
++      const o = shape();
++      for (let i = 0; i < 20; i++) expectPath(kset(o, i), 'fast');
++      return desc(o);
++    });
++  )");
++}
++
++TEST(DeclinedInterceptorStoreRepresentations) {
++  v8::Isolate* isolate = CcTest::isolate();
++  v8::HandleScope scope(isolate);
++  LocalContext env;
++  SetUpDeclinedStoreTest(isolate, env.local());
++  RunDeclinedStoreScript(isolate, R"(
++    function overwrite(name, init, warm_value, values, all_fast = false) {
++      return compare(name, ({set}) => {
++        const shape = () => make({['r_' + name]: 0, x: init});
++        warm(set, shape, warm_value);
++        const o = shape();
++        const sibling = shape();
++        const paths = values.map(v => set(o, v));
++        if (all_fast) for (const path of paths) expectPath(path, 'fast');
++        check(Object.is(o.x, values[values.length - 1]), 'value');
++        return desc(o) + ' ' + desc(sibling);
++      });
++    }
++    overwrite('smi', 0, i => i, [1, 2, -3], true);
++    overwrite('double', 1.5, i => i + 0.5, [2.5, 3, -0, NaN, 1e300], true);
++    overwrite('smi to double', 0, i => i, [1, 1.5, 2, 2.5]);
++    overwrite('smi to tagged', 0, i => i, [1, 'str', 2, {}]);
++    overwrite('double to tagged', 1.5, i => i + 0.5, [2.5, 'str', 3.5]);
++    overwrite('heap object field type', {a: 0}, i => ({a: i}),
++              [{a: 7}, {b: 1}, {a: 8}, 'str', 3]);
++    overwrite('tagged', 'str', i => i % 2 ? 'odd' : 1.5,
++              ['s', 1, 2.5, {}, undefined, null], true);
++  )");
++}
++
++TEST(DeclinedInterceptorStoreConstness) {
++  v8::Isolate* isolate = CcTest::isolate();
++  v8::HandleScope scope(isolate);
++  LocalContext env;
++  SetUpDeclinedStoreTest(isolate, env.local());
++  RunDeclinedStoreScript(isolate, R"(
++    compare('const field', ({set}) => {
++      const shape = () => make({c1: 0, x: 0});
++      // Any overwrite makes the field mutable, so the IC is warmed up with
++      // stores that the setter aborts.
++      onSet = (holder, n, v) => { if (v === -1) throw 'abort'; };
++      warm(set, shape, i => -1);
++      onSet = undefined;
++      const o = shape();
++      expectPath(set(o, 1), 'runtime');
++      for (let i = 2; i < 20; i++) expectPath(set(o, i), 'fast');
++      return desc(o);
++    });
++  )");
++}
++
++TEST(DeclinedInterceptorStoreCallbackSideEffects) {
++  v8::Isolate* isolate = CcTest::isolate();
++  v8::HandleScope scope(isolate);
++  LocalContext env;
++  SetUpDeclinedStoreTest(isolate, env.local());
++  RunDeclinedStoreScript(isolate, R"(
++    withEffect('delete', o => { delete o.x; });
++    withEffect('delete first', o => { delete o.x; },
++               {keys: {x: 0, w_delete_first: 0}});
++    withEffect('delete and re-add', o => { delete o.x; o.x = 5; });
++    withEffect('add another property', o => { o.z = 1; });
++    withEffect('normalize', o => { delete o.w_normalize; },
++               {keys: {w_normalize: 0, x: 0}});
++    withEffect('read-only sloppy',
++               o => { Object.defineProperty(o, 'x', {writable: false}); });
++    withEffect('read-only strict',
++               o => { Object.defineProperty(o, 'x', {writable: false}); },
++               {strict: true});
++    withEffect('accessor', o => {
++      Object.defineProperty(o, 'x', {
++        get() { return 'g'; },
++        set(v) { log.push('accessor:' + v); },
++        configurable: true
++      });
++    });
++    withEffect('freeze sloppy', o => { Object.freeze(o); }, {path: 'any'});
++    withEffect('freeze strict', o => { Object.freeze(o); },
++               {strict: true, path: 'any'});
++    withEffect('seal', o => { Object.seal(o); }, {path: 'any'});
++    withEffect('prevent extensions', o => { Object.preventExtensions(o); },
++               {path: 'any'});
++    withEffect('change prototype', o => { Object.setPrototypeOf(o, {}); });
++    withEffect('prototype with setter', o => {
++      Object.setPrototypeOf(o, {set x(v) { log.push('proto setter'); }});
++    });
++    withEffect('prototype away and back', o => {
++      const proto = Object.getPrototypeOf(o);
++      Object.setPrototypeOf(o, {});
++      Object.setPrototypeOf(o, proto);
++    }, {path: 'any'});
++    withEffect('deprecate map via sibling',
++               (o, sibling) => { sibling.x = 1.5; });
++    withEffect('generalize field type via sibling',
++               (o, sibling) => { sibling.x = 'str'; }, {path: 'fast'});
++    withEffect('throw', o => { throw 'boom'; }, {path: 'any'});
++    withEffect('write itself', o => { o.x = 7; }, {path: 'fast'});
++    withEffect('write itself then delete', o => { o.x = 7; delete o.x; });
++    withEffect('used as prototype', o => { Object.create(o); });
++  )");
++}
++
++TEST(DeclinedInterceptorStoreExclusions) {
++  v8::Isolate* isolate = CcTest::isolate();
++  v8::HandleScope scope(isolate);
++  LocalContext env;
++  SetUpDeclinedStoreTest(isolate, env.local());
++  RunDeclinedStoreScript(isolate, R"(
++    compare('non-masking', ({set}) => {
++      const shape = () => make({n1: 0, x: 0}, TNonMasking);
++      warm(set, shape, i => i, 0);
++      const o = shape();
++      for (let i = 0; i < 5; i++) set(o, i, 0);
++      set(make({n1: 0}, TNonMasking), 1, 1);
++      return desc(o);
++    });
++    compare('symbol with kOnlyInterceptStrings', ({kset}) => {
++      const sym = Symbol.for('s');
++      const shape = () => { const o = new TStringsOnly(); o[sym] = 0; return o; };
++      for (let i = 0; i < 12; i++) kset(shape(), i, 0, sym);
++      const o = shape();
++      for (let i = 0; i < 5; i++) kset(o, i, 0, sym);
++      return String(o[sym]);
++    });
++    compare('symbol', ({kset}) => {
++      const sym = Symbol.for('s');
++      const shape = () => { const o = new T(); o[sym] = 0; return o; };
++      for (let i = 0; i < 12; i++) kset(shape(), i, 1, sym);
++      const o = shape();
++      for (let i = 0; i < 5; i++) expectPath(kset(o, i, 1, sym), 'fast');
++      return desc(o);
++    });
++    compare('class fields', ({set}) => {
++      class F extends T { x = 1; y = 2; }
++      const before = calls();
++      const objects = [];
++      for (let i = 0; i < 12; i++) objects.push(new F());
++      log.push('define calls ' + (calls() - before));
++      for (const o of objects) set(o, 5);
++      return desc(objects[11]);
++    });
++    compare('access checked', ({set}) => {
++      const shape = () => make({a1: 0, x: 0}, TAccessChecked);
++      warm(set, shape);
++      const o = shape();
++      for (let i = 0; i < 5; i++) expectPath(set(o, i), 'slow');
++      return String(o.x);
++    });
++    compare('interceptor on the prototype', ({set}) => {
++      const proto = new TWithGetter();
++      const shape = () => Object.create(proto);
++      warm(set, shape, i => i, 0);
++      const o = shape();
++      for (let i = 0; i < 5; i++) set(o, i, 0);
++      // Reflect.set and the IC miss add the property through different
++      // paths, so only the observable values are compared.
++      return JSON.stringify(Object.getOwnPropertyNames(o)) + o.x;
++    });
++    compare('dictionary mode', ({set}) => {
++      const shape = () => {
++        const o = make({d1: 0, d2: 0, x: 0});
++        delete o.d1;
++        return o;
++      };
++      warm(set, shape);
++      const o = shape();
++      check(!%HasFastProperties(o), 'dictionary');
++      for (let i = 0; i < 5; i++) expectPath(set(o, i), 'runtime');
++      return desc(o);
++    });
++    compare('add a missing property', ({set}) => {
++      const shape = () => make({a2: 0});
++      warm(set, shape);
++      const objects = [];
++      for (let i = 0; i < 5; i++) {
++        const o = shape();
++        expectPath(set(o, i), 'runtime');
++        objects.push(o);
++      }
++      return objects.map(desc).join(' ');
++    });
++    for (const name of ['constructor', 'then', 'next', 'valueOf']) {
++      compare('protector name ' + name, ({kset}) => {
++        const shape = () => make({p0: 0, [name]: 0});
++        for (let i = 0; i < 12; i++) kset(shape(), i, 1, name);
++        const o = shape();
++        for (let i = 0; i < 5; i++) expectPath(kset(o, i, 1, name), 'slow');
++        return desc(o);
++      });
++    }
++  )");
++}
++
++TEST(DeclinedInterceptorStoreGlobalProxy) {
++  v8::Isolate* isolate = CcTest::isolate();
++  v8::HandleScope scope(isolate);
++  Local<ObjectTemplate> global_template = ObjectTemplate::New(isolate);
++  v8::NamedPropertyHandlerConfiguration conf(nullptr, DeclinedStoreSetter);
++  global_template->SetHandler(conf);
++  LocalContext env(nullptr, global_template);
++  SetUpDeclinedStoreTest(isolate, env.local());
++  RunDeclinedStoreScript(isolate, R"(
++    var x = 0;
++    function sloppyContextual(v) { x = v; }
++    function strictContextual(v) { 'use strict'; x = v; }
++    compare('global proxy', ({set, sset}) => {
++      const values = [];
++      for (let i = 0; i < 20; i++) {
++        const sloppy_path = set(globalThis, i);
++        values.push(x);
++        const strict_path = sset(globalThis, i + 100);
++        values.push(x);
++        if (i > 10) {
++          expectPath(sloppy_path, 'runtime');
++          expectPath(strict_path, 'runtime');
++        }
++      }
++      return values.join(',');
++    });
++    for (let i = 0; i < 20; i++) {
++      let before = calls();
++      sloppyContextual(i);
++      check(x === i && calls() - before === 1,
++            'sloppy contextual ' + (calls() - before));
++      before = calls();
++      strictContextual(i + 100);
++      check(x === i + 100 && calls() - before === 0,
++            'strict contextual ' + (calls() - before));
++    }
++  )");
++}
