@@ -11,7 +11,7 @@ on:
         options: [all, android, ios, android-intl]
         default: all
   push:
-    branches: [main]
+    branches: [main, build/android-intl]
     tags: ['v8-*']
   pull_request:
     paths:
@@ -60,7 +60,7 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(inputs.platforms == 'android-intl' && '{"include":[{"abi":"arm64-v8a","profile":"intl","artifact":"arm64-v8a-intl"},{"abi":"arm64-v8a","profile":"intl-a73","artifact":"arm64-v8a-intl-a73"}]}' || '{"abi":["arm64-v8a","x86_64","armeabi-v7a","x86"]}') }}
+      matrix: ${{ fromJSON((inputs.platforms == 'android-intl' || github.ref == 'refs/heads/build/android-intl') && '{"include":[{"abi":"arm64-v8a","profile":"intl","artifact":"arm64-v8a-intl"},{"abi":"arm64-v8a","profile":"intl-a73","artifact":"arm64-v8a-intl-a73"}]}' || '{"abi":["arm64-v8a","x86_64","armeabi-v7a","x86"]}') }}
     # The R2 bucket has two prefixes with separate lifecycle rules:
     # artifacts/<inputs-hash>/ holds finished tarballs (expired quickly; a miss
     # just means building, as before) and sccache/ holds the compiler cache
@@ -203,7 +203,7 @@ jobs:
 
   ios:
     needs: config
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios' }}
+    if: ${{ github.ref != 'refs/heads/build/android-intl' && (github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios') }}
     runs-on: macos-15
     timeout-minutes: 300
     strategy:
