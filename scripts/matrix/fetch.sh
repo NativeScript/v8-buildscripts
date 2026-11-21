@@ -97,6 +97,12 @@ git -C v8 apply "$ROOT_DIR/patches/v8_nonmasking_own_lookup.patch"
 git -C v8 apply "$ROOT_DIR/patches/v8_create_data_property_interceptor.patch"
 git -C v8 apply "$ROOT_DIR/patches/v8_interceptor_define_descriptor.patch"
 
+# Store ICs finish overwriting an existing own data field after a masking
+# named interceptor's setter declines, instead of redoing the store in the
+# runtime. Behavior-preserving; --no-store-ic-declined-interceptor-fast-path
+# turns it off.
+git -C v8 apply "$ROOT_DIR/patches/v8_declined_interceptor_store_fast_path.patch"
+
 if [ "$PLATFORM" = "ios" ]; then
     # Mac Catalyst compiles as iOS but runs on macOS; this gives its JIT build
     # the macOS MAP_JIT + pthread_jit_write_protect_np handling.
