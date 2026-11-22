@@ -18,8 +18,11 @@ int main() {
         v8::Context::Scope context_scope(context);
         auto source = v8::String::NewFromUtf8Literal(isolate, R"(
             new Intl.NumberFormat('de-DE').format(1234.5) === '1.234,5' &&
-            new WebAssembly.Instance(new WebAssembly.Module(
-              new Uint8Array([0,97,115,109,1,0,0,0]))) instanceof WebAssembly.Instance
+            new Intl.DateTimeFormat('en-US', {year:'numeric', timeZone:'UTC'}).format(0) === '1970' &&
+            new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([
+              0,97,115,109,1,0,0,0, 1,5,1,96,0,1,127, 3,2,1,0,
+              7,7,1,3,114,117,110,0,0, 10,6,1,4,0,65,42,11
+            ]))).exports.run() === 42
         )");
         v8::Local<v8::Script> script;
         v8::Local<v8::Value> result;

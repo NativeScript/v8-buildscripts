@@ -140,7 +140,8 @@ case "$PROFILE" in
         fi
         GN_ARGS="${GN_ARGS/use_thin_lto=false/use_thin_lto=true}"
         GN_ARGS="${GN_ARGS/v8_enable_i18n_support=false/v8_enable_i18n_support=true}"
-        GN_ARGS="$GN_ARGS optimize_for_size=true v8_jitless=false"
+        GN_ARGS="${GN_ARGS/default_min_sdk_version=21/default_min_sdk_version=29}"
+        GN_ARGS="$GN_ARGS optimize_for_size=true v8_jitless=false v8_generate_external_defines_header=true v8_monolithic_for_shared_library=true"
         if [[ "$PROFILE" == intl-a73 ]]; then GN_ARGS="$GN_ARGS android_tune_cortex_a73=true"; fi
         OUTFOLDER="$OUTFOLDER-$PROFILE"
         DIST="$DIST-$PROFILE"
@@ -174,6 +175,9 @@ fi
 # The public headers are architecture-independent but are shipped per artifact
 # so that a consumer only has to fetch one thing.
 rsync -a --delete "$V8_DIR/include/" "$DIST/include/"
+if [[ "$PROFILE" != default ]]; then
+    cp "$OUTFOLDER/gen/include/v8-gn.h" "$DIST/include/"
+fi
 mkdir -p "$DIST/include/inspector"
 cp "$OUTFOLDER/gen/include/inspector/"*.h "$DIST/include/inspector/"
 

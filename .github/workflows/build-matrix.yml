@@ -19,6 +19,7 @@ on:
       - 'patches/**'
       - 'scripts/matrix/**'
       - 'tests/apple-args.py'
+      - 'tests/android-intl-smoke.cc'
       - '.github/workflows/build-matrix.yml'
 
 permissions:
@@ -50,7 +51,7 @@ jobs:
           # Everything the artifacts are a function of, hashed by blob id.
           # Commits with an unchanged hash produce identical artifacts, so a
           # finished build in R2 can be reused instead of repeated.
-          echo "inputs_hash=$(git ls-files -s config.env patches scripts/matrix .github/workflows/build-matrix.yml \
+          echo "inputs_hash=$(git ls-files -s config.env patches scripts/matrix tests/android-intl-smoke.cc .github/workflows/build-matrix.yml \
             | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
 
   android:
@@ -158,9 +159,15 @@ jobs:
         if: matrix.profile && steps.cache.outputs.hit != 'true'
         run: |
           dist="dist/android-$ARTIFACT"
-          "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++" \
-            -std=c++20 -Os -Wl,--gc-sections -I"$dist/include" tests/android-intl-smoke.cc \
-            "$dist/lib/libv8_monolith.a" -static-libstdc++ -llog -landroid -latomic -ldl -lm -o "$dist/intl-smoke"
+          bin="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cxx="$bin/aarch64-linux-android29-clang++"
+          "$cxx" -std=c++20 -DV8_GN_HEADER -fPIC -Os -I"$dist/include" -c tests/android-intl-smoke.cc -o "$RUNNER_TEMP/intl-smoke.o"
+          libs=("$RUNNER_TEMP/intl-smoke.o" "$dist/lib/libv8_monolith.a" -static-libstdc++ -llog -landroid -latomic -ldl -lm)
+          "$cxx" -shared -Wl,-z,defs,--gc-sections "${libs[@]}" -o "$RUNNER_TEMP/libintl-smoke.so"
+          "$cxx" -Wl,--gc-sections "${libs[@]}" -o "$dist/intl-smoke"
+          # Bionic requires at least 64-byte executable TLS alignment on arm64.
+          tls=$("$bin/llvm-readelf" -lW "$dist/intl-smoke" | awk '$1 == "TLS" {print $NF}')
+          [[ -z "$tls" ]] || (( tls >= 64 ))
 
       - name: Package
         if: steps.cache.outputs.hit != 'true'

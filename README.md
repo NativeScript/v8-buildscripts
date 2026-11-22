@@ -205,7 +205,10 @@ Select `android-intl` in **Build V8 matrix** to produce two Android arm64
 artifacts with built-in ICU data, WebAssembly, and JIT. The `intl` artifact
 targets baseline arm64-v8a; `intl-a73` requires ARM CRC and crypto extensions
 and is tuned for Cortex-A73. Do not ship the tuned archive as a generic arm64
-library. Existing releases and compact default builds are unchanged.
+library. Both opt-in profiles target Android 10 (API 29) or newer. Compile
+consumers with `-DV8_GN_HEADER` and the artifact's own `include/` directory:
+the generated header describes its public ABI, including pointer compression.
+Existing releases and compact default builds are unchanged.
 
 Both variants optimize for size, use ThinLTO without PGO, and ship a native
 relocatable object in the monolithic archive so consumers do not need the
