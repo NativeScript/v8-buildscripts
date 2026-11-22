@@ -8,10 +8,10 @@ on:
       platforms:
         description: Which platforms to build
         type: choice
-        options: [all, android, ios]
+        options: [all, android, ios, android-intl]
         default: all
   push:
-    branches: [main]
+    branches: [main, build/android-intl]
     tags: ['v8-*']
   pull_request:
     paths:
@@ -19,6 +19,7 @@ on:
       - 'patches/**'
       - 'scripts/matrix/**'
       - 'tests/apple-args.py'
+      - 'tests/android-intl-smoke.cc'
       - '.github/workflows/build-matrix.yml'
 
 permissions:
@@ -50,24 +51,25 @@ jobs:
           # Everything the artifacts are a function of, hashed by blob id.
           # Commits with an unchanged hash produce identical artifacts, so a
           # finished build in R2 can be reused instead of repeated.
-          echo "inputs_hash=$(git ls-files -s config.env patches scripts/matrix .github/workflows/build-matrix.yml \
+          echo "inputs_hash=$(git ls-files -s config.env patches scripts/matrix tests/android-intl-smoke.cc .github/workflows/build-matrix.yml \
             | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
 
   android:
     needs: config
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'android' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || startsWith(inputs.platforms, 'android') || inputs.platforms == 'all' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      matrix:
-        abi: [arm64-v8a, x86_64, armeabi-v7a, x86]
+      matrix: ${{ fromJSON((inputs.platforms == 'android-intl' || github.ref == 'refs/heads/build/android-intl') && '{"include":[{"abi":"arm64-v8a","profile":"intl","artifact":"arm64-v8a-intl"},{"abi":"arm64-v8a","profile":"intl-a73","artifact":"arm64-v8a-intl-a73"}]}' || '{"abi":["arm64-v8a","x86_64","armeabi-v7a","x86"]}') }}
     # The R2 bucket has two prefixes with separate lifecycle rules:
     # artifacts/<inputs-hash>/ holds finished tarballs (expired quickly; a miss
     # just means building, as before) and sccache/ holds the compiler cache
     # (kept long). Every R2 step is skipped when the secrets are absent, e.g.
     # on a fork PR, and the build then runs exactly as it would without R2.
     env:
+      ARTIFACT: ${{ matrix.artifact || matrix.abi }}
+      PROFILE: ${{ matrix.profile || 'default' }}
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -87,8 +89,8 @@ jobs:
         id: cache
         if: env.AWS_ACCESS_KEY_ID != ''
         run: |
-          keys="v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz"
-          if [ "${{ matrix.abi }}" = "arm64-v8a" ]; then
+          keys="v8-${{ needs.config.outputs.v8_version }}-android-$ARTIFACT.tar.gz"
+          if [ "$ARTIFACT" = "arm64-v8a" ]; then
             keys="$keys v8-${{ needs.config.outputs.v8_version }}-src-headers.tar.gz"
           fi
           prefix="artifacts/${{ needs.config.outputs.inputs_hash }}"
@@ -146,25 +148,39 @@ jobs:
       - name: Build ${{ matrix.abi }}
         if: steps.cache.outputs.hit != 'true'
         run: >
-          scripts/matrix/build-android.sh --abi ${{ matrix.abi }}
+          scripts/matrix/build-android.sh --abi ${{ matrix.abi }} --profile "$PROFILE"
           ${{ env.AWS_ACCESS_KEY_ID != '' && '--cc-wrapper sccache' || '' }}
 
       - name: sccache stats
         if: env.AWS_ACCESS_KEY_ID != '' && steps.cache.outputs.hit != 'true'
         run: sccache --show-stats
 
+      - name: Link Android Intl and WebAssembly smoke test with the consumer NDK
+        if: matrix.profile && steps.cache.outputs.hit != 'true'
+        run: |
+          dist="dist/android-$ARTIFACT"
+          bin="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cxx="$bin/aarch64-linux-android29-clang++"
+          "$cxx" -std=c++20 -DV8_GN_HEADER -fPIC -Os -I"$dist/include" -c tests/android-intl-smoke.cc -o "$RUNNER_TEMP/intl-smoke.o"
+          libs=("$RUNNER_TEMP/intl-smoke.o" "$dist/lib/libv8_monolith.a" -static-libstdc++ -llog -landroid -latomic -ldl -lm)
+          "$cxx" -shared -Wl,-z,defs,--gc-sections "${libs[@]}" -o "$RUNNER_TEMP/libintl-smoke.so"
+          "$cxx" -Wl,--gc-sections "${libs[@]}" -o "$dist/intl-smoke"
+          # Bionic requires at least 64-byte executable TLS alignment on arm64.
+          tls=$("$bin/llvm-readelf" -lW "$dist/intl-smoke" | awk '$1 == "TLS" {print $NF}')
+          [[ -z "$tls" ]] || (( tls >= 64 ))
+
       - name: Package
         if: steps.cache.outputs.hit != 'true'
         run: |
-          tar -czf "v8-${{ needs.config.outputs.v8_version }}-android-${{ matrix.abi }}.tar.gz" \
-            -C dist "android-${{ matrix.abi }}"
+          tar -czf "v8-${{ needs.config.outputs.v8_version }}-android-$ARTIFACT.tar.gz" \
+            -C dist "android-$ARTIFACT"
 
       # The internal headers are architecture-independent, so one job produces
       # them. It piggybacks on a build rather than getting its own job because
       # src/inspector/protocol/*.h are generated into gen/ and only exist once
       # something has been built.
       - name: Package the internal headers
-        if: matrix.abi == 'arm64-v8a' && steps.cache.outputs.hit != 'true'
+        if: matrix.abi == 'arm64-v8a' && !matrix.profile && steps.cache.outputs.hit != 'true'
         run: |
           scripts/matrix/package-src-headers.sh \
             --gen-dir .v8/v8/out.gn/android-arm64-release/gen
@@ -181,12 +197,12 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: v8-android-${{ matrix.abi }}
-          path: v8-*-android-${{ matrix.abi }}.tar.gz
+          name: v8-android-${{ env.ARTIFACT }}
+          path: v8-*-android-${{ env.ARTIFACT }}.tar.gz
           retention-days: 7
 
       - uses: actions/upload-artifact@v7
-        if: matrix.abi == 'arm64-v8a'
+        if: matrix.abi == 'arm64-v8a' && !matrix.profile
         with:
           name: v8-src-headers
           path: v8-*-src-headers.tar.gz
@@ -194,7 +210,7 @@ jobs:
 
   ios:
     needs: config
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios' }}
+    if: ${{ github.ref != 'refs/heads/build/android-intl' && (github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios') }}
     runs-on: macos-15
     timeout-minutes: 300
     strategy:

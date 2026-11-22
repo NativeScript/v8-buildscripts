@@ -13,6 +13,7 @@ source "$ROOT_DIR/config.env"
 V8_DIR="$ROOT_DIR/.v8/v8"
 NDK_ROOT=""
 ABI=""
+PROFILE=default
 CC_WRAPPER=""
 NINJA_ARGS=()
 
@@ -22,6 +23,7 @@ Usage: $(basename "$0") --abi <abi> [--v8-dir <path>] [--ndk-root <path>]
                         [--cc-wrapper <bin>] [-- <ninja args>]
 
   --abi <abi>         armeabi-v7a | arm64-v8a | x86 | x86_64
+  --profile <name>    default | intl | intl-a73 (arm64 with CRC and crypto)
   --v8-dir <path>     V8 sources (default: $V8_DIR)
   --ndk-root <path>   NDK to build against; must be the same one the runtime is
                       built with. Defaults to \$ANDROID_NDK_ROOT.
@@ -34,6 +36,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --abi)          ABI="$2"; shift 2 ;;
         --abi=*)        ABI="${1#*=}"; shift ;;
+        --profile)      PROFILE="$2"; shift 2 ;;
         --v8-dir)       V8_DIR="$2"; shift 2 ;;
         --v8-dir=*)     V8_DIR="${1#*=}"; shift ;;
         --ndk-root)     NDK_ROOT="$2"; shift 2 ;;
@@ -128,6 +131,23 @@ fi
 
 OUTFOLDER="out.gn/android-$CPU-release"
 DIST="$ROOT_DIR/dist/android-$ABI"
+case "$PROFILE" in
+    default) ;;
+    intl|intl-a73)
+        if [[ "$PROFILE" == intl-a73 && "$CPU" != arm64 ]]; then
+            echo "intl-a73 requires arm64-v8a" >&2
+            exit 1
+        fi
+        GN_ARGS="${GN_ARGS/use_thin_lto=false/use_thin_lto=true}"
+        GN_ARGS="${GN_ARGS/v8_enable_i18n_support=false/v8_enable_i18n_support=true}"
+        GN_ARGS="${GN_ARGS/default_min_sdk_version=21/default_min_sdk_version=29}"
+        GN_ARGS="$GN_ARGS optimize_for_size=true v8_jitless=false v8_generate_external_defines_header=true v8_monolithic_for_shared_library=true"
+        if [[ "$PROFILE" == intl-a73 ]]; then GN_ARGS="$GN_ARGS android_tune_cortex_a73=true"; fi
+        OUTFOLDER="$OUTFOLDER-$PROFILE"
+        DIST="$DIST-$PROFILE"
+        ;;
+    *) echo "Invalid Android profile: $PROFILE" >&2; exit 1 ;;
+esac
 
 cd "$V8_DIR"
 
@@ -141,11 +161,23 @@ ninja "${NINJA_ARGS[@]}" -C "$OUTFOLDER" v8_monolith
 echo "Finished $ABI: $(date)"
 
 mkdir -p "$DIST/lib" "$DIST/include"
-cp "$OUTFOLDER/obj/libv8_monolith.a" "$DIST/lib/"
+if [[ "$PROFILE" == default ]]; then
+    cp "$OUTFOLDER/obj/libv8_monolith.a" "$DIST/lib/"
+else
+    # Resolve bitcode with the compiler that produced it, not the embedder's NDK.
+    tools=third_party/llvm-build/Release+Asserts/bin
+    "$tools/ld.lld" -r --whole-archive "$OUTFOLDER/obj/libv8_monolith.a" \
+        --no-whole-archive -o "$OUTFOLDER/v8_monolith.o"
+    "$tools/llvm-ar" rcs "$OUTFOLDER/libv8_monolith.a" "$OUTFOLDER/v8_monolith.o"
+    cp "$OUTFOLDER/libv8_monolith.a" "$DIST/lib/"
+fi
 
 # The public headers are architecture-independent but are shipped per artifact
 # so that a consumer only has to fetch one thing.
 rsync -a --delete "$V8_DIR/include/" "$DIST/include/"
+if [[ "$PROFILE" != default ]]; then
+    cp "$OUTFOLDER/gen/include/v8-gn.h" "$DIST/include/"
+fi
 mkdir -p "$DIST/include/inspector"
 cp "$OUTFOLDER/gen/include/inspector/"*.h "$DIST/include/inspector/"
 
